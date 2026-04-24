@@ -1,0 +1,12 @@
+[Unit]
+Description=uni-dc service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/uni/uni-dc
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
