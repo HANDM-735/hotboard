@@ -379,11 +379,42 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                 } catch (const std::exception & e) {
                     mg_http_reply(c, 500, "Content-Type:application/json\r\n", "{\"statusCode\":\"500\"},{\"message\":\"Unknow Error\"}");
                 }
+<<<<<<< HEAD
+=======
+            } else if (mg_match(hm->uri, mg_str("/Uni/LoadCalibrationConfig"), NULL)) {
+                try {
+                    struct mg_str* content_type_header = mg_http_get_header(hm, "Content-Type");
+                    if (content_type_header == nullptr) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\"},{\"message\":\"Invalid Message\"}");
+                        return;
+                    }
+                    std::string content_type(content_type_header->buf, content_type_header->len);
+                    // 检查是否为multipart/form-data
+                    if (content_type.find("multipart/form-data") == std::string::npos) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\",\"message\":\"Content-Type does not multipart/form-data\"}");
+                        return;
+                    }
+                    int ret = BoardManager->load_config_calibration_file(hm->body);
+                    if (ret != 0) {    
+                        mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"statusCode\":\"400\",\"message\":\"LoadCalibrationConfig failed\"}");
+                        return;
+                    }
+                    mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"statusCode\":\"200\",\"message\":\"LoadCalibrationConfig successfully\"}");
+                } catch (const json::parse_error& e) {
+                    mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\",\"message\":\"Invalid Form-data\"}");
+                } catch (const std::exception &e) {
+                    mg_http_reply(c, 500, "Content-Type:application/json\r\n", "{\"statusCode\":\"500\",\"message\":\"Unknow Error\"}");
+                }
+>>>>>>> 144de71 (增加main)
             }
             /* 以下数据处理只用于MCU固件升级 */
             else if (mg_match(hm->uri, mg_str("/Uni/upgrade"), NULL)) {
                 try {
+<<<<<<< HEAD
                     struct mg_str content_type_header = mg_http_get_header(hm, "Content-Type");
+=======
+                    struct mg_str* content_type_header = mg_http_get_header(hm, "Content-Type");
+>>>>>>> 144de71 (增加main)
                     if (content_type_header == nullptr) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\"},{\"message\":\"Invalid Message\"}");
                         return;

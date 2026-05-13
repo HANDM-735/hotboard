@@ -1,5 +1,10 @@
 #ifndef XBOARDDATA_H
 #define XBOARDDATA_H
+<<<<<<< HEAD
+=======
+
+#include "xcrypto.hpp"
+>>>>>>> 144de71 (增加main)
 #include <unistd.h>
 #include <fstream>
 #include <ifaddrs.h>
@@ -22,6 +27,19 @@
 #include <nlohmann/json.hpp>
 #include "udpserver.h"
 
+<<<<<<< HEAD
+=======
+#ifdef __cplusplus
+extern "C" {
+#endif
+ 
+#include "mongoose.h"
+
+#ifdef __cplusplus
+}
+#endif
+
+>>>>>>> 144de71 (增加main)
 #define PGB_WARM_SW  0x81
 #define BIB_WARM_SW  0x82
 #define REPORT_CYCLE  0x83
@@ -952,9 +970,15 @@ json getAllVoutAlarm() {
                                 it->second.first.m_iBibId = (int)ReadLowByteInt(PayData+iT*2,4); //bib id
                                 cal_data = find_data(it->second.first.m_iBibId);
                                 if (cal_data.size() > 0) {
+<<<<<<< HEAD
                                     std::cout << "cal_data size:%d" << cal_data.size() << std::endl;
                                 } else {
                                     std::cout << "Error: can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
+=======
+                                    std::cout << "cal_data size:" << cal_data.size() << std::endl;
+                                } else {
+                                    std::cout << "Error: new_board can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
+>>>>>>> 144de71 (增加main)
                                 }
                             }
                         }
@@ -1232,13 +1256,28 @@ json getAllVoutAlarm() {
 
     std::map<int,vector<std::pair<double, double>>> find_data(int id)
     {
+<<<<<<< HEAD
         auto itdata =calibration_map.find(id);
+=======
+        std::unique_lock<std::mutex> lock(calibration_map_mutex);
+        auto itdata = calibration_map.find(id);
+>>>>>>> 144de71 (增加main)
         if(itdata == calibration_map.end()) return std::map<int,vector<std::pair<double, double>>>();
         return itdata->second;
     }
 
+<<<<<<< HEAD
     int ConfigureCalibrationMap()
     {
+=======
+    int ConfigureCalibrationMap(bool already_locked = false)
+    {
+        std::unique_lock<std::mutex> lock(calibration_map_mutex, std::defer_lock);
+        if (!already_locked)
+        {
+            lock.lock();
+        }
+>>>>>>> 144de71 (增加main)
         if (!calibration_map.empty()) { // 校准数据非空，无需再次读取
             return 0;
         }
@@ -1246,9 +1285,12 @@ json getAllVoutAlarm() {
         FILE *file_fd = fopen(data_def_file.c_str(),"r");
         if(!file_fd) {
             std::cout << "Error: open /usr/share/zcqdemo/ConfigureUniCalibrationMap.csv failed, please check this file!!!" << std::endl;
+<<<<<<< HEAD
             if (fclose(file_fd) != 0) { // 关闭文件
                 perror("Failed to close file");
             }
+=======
+>>>>>>> 144de71 (增加main)
             return 0; // 如果校准文件打开失败，不再返回错误，因为有不存在校准文件的场景，只打印错误日志
         }
         char read_buff[1024] = {0};
@@ -1287,16 +1329,158 @@ json getAllVoutAlarm() {
     }
 
 
-    //现在我想增加个新需求
-    int load_config_calibration_file(const struct mg_str& body) {
-        // 服务端ui会传    md5:md5值+file:<二进制文件> 给我
-        // 1、通过http把ui界面的file导入/usr/share/zcqdemo/ConfigureUniCalibrationMap.csv
-        // 2、导入之后，把文件内容更新内存中
+    void deleteDirectory(const std::string& path) {
+        DIR* dir = opendir(path.c_str());
+        if (!dir) {
+            return;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            const std::string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+
+            std::string fullPath = path + "/" + name;
+            struct stat statbuf;
+            if (stat(fullPath.c_str(), &statbuf) == -1) {
+                continue;
+            }
+
+            if (S_ISDIR(statbuf.st_mode)) {
+                deleteDirectory(fullPath);
+                rmdir(fullPath.c_str());
+            } else {
+                unlink(fullPath.c_str());
+            }
+        }
+        closedir(dir);
     }
+
+
+    bool createDirectory(const std::string& path) {
+        return mkdir(path.c_str(), 0766) == 0; // Linux/Unix权限设置
+    }
+
+    // 检查目录是否存在
+    bool dirExists(const std::string& path) {
+        struct stat info;
+        return stat(path.c_str(), &info) == 0 && (info.st_mode & S_IFDIR);
+    }
+
+    bool checkDir(const std::string& path) {
+        std::string dirpath = path.substr(0, path.find_last_of("/\\"));
+        if (!dirExists(dirpath)) {
+            if (!createDirectory(dirpath)) {
+                std::cerr << "Failed to create directory: " << dirpath << std::endl;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool saveFile(const std::string& filepath, const std::vector<char>& data) {
+        std::ofstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "Cannot open file for writing: " << filepath << std::endl;
+            return false;
+        }
+        file.write(data.data(), data.size());
+        file.close();
+        return !file.fail();
+    }
+
+    int load_config_calibration_file(const struct mg_str& body) {
+        const char* TARGET_FILE = "/usr/share/zcqdemo/ConfigureUniCalibrationMap.csv";
+        const char* TARGET_DIR = "/usr/share/zcqdemo";
+        // 解析 multipart/form-data
+        std::map<std::string, std::string> text_fields;
+        std::map<std::string, std::vector<char>> file_data;
+        std::map<std::string, std::string> filenames;
+        // 使用mongoose的multipart解析函数，循环解析每个part
+        struct mg_http_part part;
+        size_t ofs = 0;
+
+        while ((ofs = mg_http_next_multipart(body, ofs, &part)) != 0) {
+            std::string name(part.name.buf, part.name.len);
+
+            if (part.filename.len > 0) {
+                std::string filename(part.filename.buf, part.filename.len);
+                std::vector<char> file_content(part.body.buf, part.body.buf + part.body.len);
+                file_data[name] = file_content;
+                filenames[name] = filename;
+                std::cout << "Found calibration file field: " << name
+                        << ", filename: " << filename
+                        << ", size: " << file_content.size() << " bytes" << std::endl;
+            } else {
+                // 文本字段
+                std::string value(part.body.buf, part.body.len);
+                text_fields[name] = value;
+                std::cout << "Found calibration text field: " << name << " = " << value << std::endl;
+            }
+        }
+
+        // 字段校验
+        if (file_data.find("file") == file_data.end() ||
+            filenames.find("file") == filenames.end() ||
+            text_fields.find("md5") == text_fields.end())
+        {
+            std::cerr << "Calibration form data is missing! Required fields: file, md5" << std::endl;
+            return -1;
+        }
+
+        std::string expected_md5 = text_fields["md5"];
+        std::vector<char>& tmp_data = file_data["file"];
+        // 计算文件实际MD5
+        std::string actual_md5 = xcryto::get_md5(std::string(tmp_data.begin(), tmp_data.end()));
+        if (actual_md5.length() != 32) {
+            std::cerr << "Calibration file MD5 calculate error" << std::endl;
+            return -1;
+        }
+        std::cout << "actual MD5: " << actual_md5 << std::endl;
+        if (actual_md5 != expected_md5) {
+            std::cerr << "Error: MD5 mismatch!" << std::endl;
+            std::cerr << "Expected:" << expected_md5 << std::endl;
+            std::cerr << "Actual:" << actual_md5 << std::endl;
+            return -1;
+        }
+        std::cout << "MD5 verification passed" << std::endl;
+        // 写入文件到目标路径
+        std::lock_guard<std::mutex> lock(calibration_map_mutex);
+        if (!checkDir(TARGET_DIR)) {
+            std::cerr << "Error: Failed to create directory: " << TARGET_DIR << std::endl;
+            return -1;
+        }
+        // 删除目录下所有文件
+        deleteDirectory(TARGET_DIR);
+        // 直接写入二进制内容
+        if (!saveFile(TARGET_FILE, tmp_data)) {
+            std::cerr << "Error: Failed to save calibration file: " << TARGET_FILE << std::endl;
+            return -1;
+        }
+        std::cout << "Calibration file saved successfully: " << TARGET_FILE << std::endl;
+
+        // 清空内存表，重新加载，当前已经持有 calibration_map_mutex，传 true
+        calibration_map.clear();
+        int reload_ret = ConfigureCalibrationMap(true);
+        if (reload_ret != 0) {
+            std::cout << "Error: Failed to reload calibration map" << std::endl;
+            return -1;
+        }
+
+        std::cout << "Calibration map updated, total entries:" << calibration_map.size() << std::endl;
+        return 0;
+    }
+    
 private:
     std::map<int,std::pair<XBoardData, XBoardTmpData>> mboards;
     std::mutex data_rw_mutex;
     std::map<int, std::map<int, std::vector<std::pair<double, double>>>> calibration_map;
+<<<<<<< HEAD
+=======
+    std::mutex calibration_map_mutex;
+>>>>>>> 144de71 (增加main)
     std::atomic<bool> running;
     std::mutex mtx;
     std::condition_variable cv;
