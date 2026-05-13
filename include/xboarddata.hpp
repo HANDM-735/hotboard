@@ -1,10 +1,7 @@
 #ifndef XBOARDDATA_H
 #define XBOARDDATA_H
-<<<<<<< HEAD
-=======
 
 #include "xcrypto.hpp"
->>>>>>> 144de71 (增加main)
 #include <unistd.h>
 #include <fstream>
 #include <ifaddrs.h>
@@ -27,8 +24,6 @@
 #include <nlohmann/json.hpp>
 #include "udpserver.h"
 
-<<<<<<< HEAD
-=======
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,7 +34,6 @@ extern "C" {
 }
 #endif
 
->>>>>>> 144de71 (增加main)
 #define PGB_WARM_SW  0x81
 #define BIB_WARM_SW  0x82
 #define REPORT_CYCLE  0x83
@@ -970,15 +964,9 @@ json getAllVoutAlarm() {
                                 it->second.first.m_iBibId = (int)ReadLowByteInt(PayData+iT*2,4); //bib id
                                 cal_data = find_data(it->second.first.m_iBibId);
                                 if (cal_data.size() > 0) {
-<<<<<<< HEAD
                                     std::cout << "cal_data size:%d" << cal_data.size() << std::endl;
                                 } else {
                                     std::cout << "Error: can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
-=======
-                                    std::cout << "cal_data size:" << cal_data.size() << std::endl;
-                                } else {
-                                    std::cout << "Error: new_board can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
->>>>>>> 144de71 (增加main)
                                 }
                             }
                         }
@@ -1256,20 +1244,12 @@ json getAllVoutAlarm() {
 
     std::map<int,vector<std::pair<double, double>>> find_data(int id)
     {
-<<<<<<< HEAD
-        auto itdata =calibration_map.find(id);
-=======
         std::unique_lock<std::mutex> lock(calibration_map_mutex);
         auto itdata = calibration_map.find(id);
->>>>>>> 144de71 (增加main)
         if(itdata == calibration_map.end()) return std::map<int,vector<std::pair<double, double>>>();
         return itdata->second;
     }
 
-<<<<<<< HEAD
-    int ConfigureCalibrationMap()
-    {
-=======
     int ConfigureCalibrationMap(bool already_locked = false)
     {
         std::unique_lock<std::mutex> lock(calibration_map_mutex, std::defer_lock);
@@ -1277,7 +1257,6 @@ json getAllVoutAlarm() {
         {
             lock.lock();
         }
->>>>>>> 144de71 (增加main)
         if (!calibration_map.empty()) { // 校准数据非空，无需再次读取
             return 0;
         }
@@ -1285,12 +1264,6 @@ json getAllVoutAlarm() {
         FILE *file_fd = fopen(data_def_file.c_str(),"r");
         if(!file_fd) {
             std::cout << "Error: open /usr/share/zcqdemo/ConfigureUniCalibrationMap.csv failed, please check this file!!!" << std::endl;
-<<<<<<< HEAD
-            if (fclose(file_fd) != 0) { // 关闭文件
-                perror("Failed to close file");
-            }
-=======
->>>>>>> 144de71 (增加main)
             return 0; // 如果校准文件打开失败，不再返回错误，因为有不存在校准文件的场景，只打印错误日志
         }
         char read_buff[1024] = {0};
