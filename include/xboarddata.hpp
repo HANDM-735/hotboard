@@ -826,45 +826,85 @@ public:
     return jsonData;
 }
 
-json getAllJsonData() {
-    json jsonData = json::array();
-    std::vector<int> board_vec;
-    {
-        std::lock_guard<std::mutex> lock_(data_rw_mutex);
-        for (const auto& mboard : mboards)
+    json getAllJsonData() {
+        json jsonData = json::array();
+        std::vector<int> board_vec;
         {
-            board_vec.push_back(mboard.first);
-        }
-    }
-
-    for (auto iboard : board_vec)
-    {
-        json jtmp = getJsonData(iboard);
-        jsonData.push_back(jtmp);
-    }
-
-    std::ofstream o("/tmp/zcqdemououtput.json");
-    o << jsonData.dump(4);
-    o.close();
-    return jsonData;
-}
-
-json getAllVoutAlarm() {
-    json jsonData;
-    std::vector<int> board_vec;
-    {
-        std::lock_guard<std::mutex> lock_(data_rw_mutex);
-        for (const auto& mboard : mboards)
-        {
-            if (mboard.second.first.m_iVoutAlarm == true)
+            std::lock_guard<std::mutex> lock_(data_rw_mutex);
+            for (const auto& mboard : mboards)
+            {
                 board_vec.push_back(mboard.first);
+            }
         }
+
+        for (auto iboard : board_vec)
+        {
+            json jtmp = getJsonData(iboard);
+            jsonData.push_back(jtmp);
+        }
+
+        std::ofstream o("/tmp/zcqdemououtput.json");
+        o << jsonData.dump(4);
+        o.close();
+        return jsonData;
     }
 
-    json j_VoutAlarm = board_vec;
-    jsonData["VoutAlarm"] = j_VoutAlarm;
-    return jsonData;
-}
+    json getAllVoutAlarm() {
+        json jsonData;
+        std::vector<int> board_vec;
+        {
+            std::lock_guard<std::mutex> lock_(data_rw_mutex);
+            for (const auto& mboard : mboards)
+            {
+                if (mboard.second.first.m_iVoutAlarm == true)
+                    board_vec.push_back(mboard.first);
+            }
+        }
+
+        json j_VoutAlarm = board_vec;
+        jsonData["VoutAlarm"] = j_VoutAlarm;
+        return jsonData;
+    }
+
+    std::string check_calibration_to_string() {
+        std::unique_lock<std::mutex> lock(calibration_map_mutex);
+        std::stringstream ss;
+        ss << "===== 内存校准数据校验 =====\n";
+        ss << "校准数据总条目数（BIB_ID数量）：" << calibration_map.size() << "\n\n";
+
+        if (calibration_map.empty()) {
+            ss << "⚠️  警告：内存中无任何校准数据！\n";
+            ss << "===== 校验结束 =====\n";
+            return ss.str();
+        }
+
+        for (const auto& bib_item : calibration_map) {
+            int bib_id = bib_item.first;
+            const auto& domin_map = bib_item.second;
+            ss << "----------------------------\n";
+            ss << "BIB_ID: " << bib_id << "\n";
+            ss << "该BIB_ID下区间(domin)数量：" << domin_map.size() << "\n";
+
+            for (const auto& domin_item : domin_map) {
+                int domin = domin_item.first;
+                const auto& cal_list = domin_item.second;
+                ss << "  区间(domin)：" << domin << "\n";
+                ss << "  该区间下校准系数对数量：" << cal_list.size() << "\n";
+                ss << "  校准系数明细（factor, offset）：\n";
+
+                for (size_t idx = 0; idx < cal_list.size(); ++idx) {
+                    double factor = cal_list[idx].first;
+                    double offset = cal_list[idx].second;
+                    ss << "    传感器索引[" << idx << "]：factor=" << std::fixed << std::setprecision(6) << factor 
+                    << ", offset=" << offset << "\n";
+                }
+            }
+            ss << "\n";
+        }
+
+        ss << "===== 校验结束 =====\n";
+        return ss.str();
+    }
 
     virtual void OnUdpReceive(std::string sFromAddr,const char *pData,int iDataLen)
     {
@@ -1277,9 +1317,8 @@ json getAllVoutAlarm() {
             std::vector<std::string> vct_cell = split_single_char_delim(line_str, ',');
             if(vct_cell.size() >= 4)
             {
-                int id = (int)strtol(vct_cell[0].c_str(),NULL,0);
-                int domin = (int)strtol(vct_cell[1].c_str(),NULL,0);
-                std::map<int, std::vector<std::pair<double, double>>> domin_map;
+                int id = (int)strtol(vct_cell[0].c_str(),NULL,16);
+                int domin = (int)strtol(vct_cell[1].c_str(),NULL,10);
                 std::vector<std::pair<double, double>> cal_value;
                 double first,second;
                 for(int i = 2; i < vct_cell.size(); i=i+2)
@@ -1443,6 +1482,8 @@ json getAllVoutAlarm() {
         }
 
         std::cout << "Calibration map updated, total entries:" << calibration_map.size() << std::endl;
+        std::string check_result = check_calibration_to_string(); 
+        std::cout << check_result << std::endl;
         return 0;
     }
     
