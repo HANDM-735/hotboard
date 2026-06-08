@@ -10,10 +10,10 @@ UDPServer::~UDPServer() {
 }
 
 void UDPServer::start() {
-    receive_thread = std::thread([this]() {
+    receive_thread_ = std::thread([this]() {
         socket_.async_receive_from(boost::asio::buffer(recv_buf), sender_endpoint_,
-            io_service_.run(); // 运行io_service以处理异步操作
-        std::bind(&UDPServer::handle_receive, this, std::placeholders::_1, std::placeholders::_2));
+            std::bind(&UDPServer::handle_receive, this, std::placeholders::_1, std::placeholders::_2));
+        io_service_.run(); // 运行io_service以处理异步操作
     });
 }
 
@@ -22,8 +22,8 @@ void UDPServer::stop() {
     cv_.notify_one();
     io_service_.stop();
 
-    if (receive_thread.joinable()) {
-        receive_thread.join();
+    if (receive_thread_.joinable()) {
+        receive_thread_.join();
     }
 
     socket_.close();
