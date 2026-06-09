@@ -39,11 +39,50 @@ extern "C" {
 #define REPORT_CYCLE  0x83
 #define PGB_POWER_CONFIG  0x85
 #define BIB_POWER_CONFIG  0x86
+#define EEPROM_READ   0x87
+#define EEPROM_WRITE  0x88
+#define EEPROM_ERASE  0x89
 
 using json = nlohmann::json;
 
 extern UDPServer* g_udp_server;
 std::string m_save_path;
+
+// EEPROM响应缓存结构
+struct EepromReadEntry {
+    uint32_t address;
+    std::string data;
+    std::time_t timestamp;
+};
+
+struct EepromReadCache {
+    std::vector<EepromReadEntry> entries;
+    std::time_t timestamp;
+    bool ready;
+    int error_code;
+    std::string error_msg;
+    std::condition_variable cv;
+
+    EepromReadCache() : timestamp(0), ready(false), error_code(0), error_msg("") {}
+};
+
+struct EepromWriteResponse {
+    int error_code;
+    std::string error_msg;
+    bool ready;
+    std::condition_variable cv;
+
+    EepromWriteResponse() : error_code(-1), error_msg(""), ready(false) {}
+};
+
+struct EepromEraseResponse {
+    int error_code;
+    std::string error_msg;
+    bool ready;
+    std::condition_variable cv;
+
+    EepromEraseResponse() : error_code(-1), error_msg(""), ready(false) {}
+};
 
 struct DataRecord {
     std::string time;
@@ -497,6 +536,368 @@ public:
         return 0;
     }
 
+    // ==================== EEPROM 操作 ====================
+
+    // 构造EEPROM读请求包
+    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x87(1) + 数据个数(4) + [(起始地址(4) + 读取长度(4))...] + CRC16(2)
+    std::string BuildEEPROMReadPack(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+        int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 读取长度(4))
+        int pack_len = 8 + data_len + 2; // 帧头(4) + 命令字(1) + 板ID(1) + 通道号(1) + 数据 + CRC16(2)
+        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
+        memset(uaSendBuff, 0, pack_len);
+        
+        // 帧头
+        uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
+        uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
+        // 命令字 0x01 请求
+        uaSendBuff[4] = 0x01;
+        // 板ID
+        uaSendBuff[5] = (unsigned char)iBoardId;
+        // 通道号 0x87 读eeprom
+        uaSendBuff[6] = EEPROM_READ;
+        // 数据位: 数据个数(4字节)
+        WriteLowByteInt(&uaSendBuff[7], count, 4);
+        // 数据位: (起始地址(4) + 读取长度(4)) * count
+        for (int i = 0; i < count; i++) {
+            WriteLowByteInt(&uaSendBuff[11 + i * 8], addresses[i], 4);
+            WriteLowByteInt(&uaSendBuff[15 + i * 8], lengths[i], 4);
+        }
+        // CRC16校验: 从命令字到数据区结束
+        int crc_len = 1 + 1 + 1 + data_len; // 命令字(1) + 板ID(1) + 通道号(1) + 数据
+        WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
+        
+        std::string result((char*)uaSendBuff, pack_len);
+        free(uaSendBuff);
+        return result;
+    }
+
+    // 构造EEPROM写请求包
+    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x88(1) + 数据个数(4) + [(起始地址(4) + 写入长度(4) + 数据(N))...] + CRC16(2)
+    std::string BuildEEPROMWritePack(int iBoardId, const std::vector<uint32_t>& addresses, 
+                                      const std::vector<std::string>& hexData, int count) {
+        // 先计算总数据长度
+        int total_data_len = 4; // 数据个数
+        std::vector<int> data_bytes(count);
+        for (int i = 0; i < count; i++) {
+            data_bytes[i] = hexData[i].length() / 2; // 十六进制字符串转字节数
+            total_data_len += 4 + 4 + data_bytes[i]; // 起始地址(4) + 写入长度(4) + 数据(N)
+        }
+        int pack_len = 8 + total_data_len + 2; // 帧头(4) + 命令字(1) + 板ID(1) + 通道号(1) + 数据 + CRC16(2)
+        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
+        memset(uaSendBuff, 0, pack_len);
+        
+        // 帧头
+        uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
+        uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
+        uaSendBuff[4] = 0x01; // 命令字 请求
+        uaSendBuff[5] = (unsigned char)iBoardId;
+        uaSendBuff[6] = EEPROM_WRITE; // 通道号 0x88 写eeprom
+        
+        // 数据个数
+        WriteLowByteInt(&uaSendBuff[7], count, 4);
+        
+        // 数据位
+        int offset = 11;
+        for (int i = 0; i < count; i++) {
+            WriteLowByteInt(&uaSendBuff[offset], addresses[i], 4); // 起始地址
+            WriteLowByteInt(&uaSendBuff[offset + 4], data_bytes[i], 4); // 写入长度
+            // 将十六进制字符串转为二进制数据
+            unsigned char* tmpData = (unsigned char*)malloc(data_bytes[i]);
+            memset(tmpData, 0, data_bytes[i]);
+            StrToHex((char*)hexData[i].c_str(), tmpData, hexData[i].length());
+            memcpy(&uaSendBuff[offset + 8], tmpData, data_bytes[i]);
+            free(tmpData);
+            offset += 8 + data_bytes[i];
+        }
+        
+        // CRC16校验
+        int crc_len = 1 + 1 + 1 + total_data_len;
+        WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
+        
+        std::string result((char*)uaSendBuff, pack_len);
+        free(uaSendBuff);
+        return result;
+    }
+
+    // 构造EEPROM擦除请求包
+    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x89(1) + 数据个数(4) + [(起始地址(4) + 擦除长度(4))...] + CRC16(2)
+    std::string BuildEEPROMErasePack(int iBoardId, const std::vector<uint32_t>& addresses,
+                                      const std::vector<uint32_t>& lengths, int count) {
+        int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 擦除长度(4))
+        int pack_len = 8 + data_len + 2;
+        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
+        memset(uaSendBuff, 0, pack_len);
+        
+        uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
+        uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
+        uaSendBuff[4] = 0x01;
+        uaSendBuff[5] = (unsigned char)iBoardId;
+        uaSendBuff[6] = EEPROM_ERASE;
+        
+        // 数据个数
+        WriteLowByteInt(&uaSendBuff[7], count, 4);
+        
+        // 数据位: (起始地址(4) + 擦除长度(4)) * count
+        for (int i = 0; i < count; i++) {
+            WriteLowByteInt(&uaSendBuff[11 + i * 8], addresses[i], 4);
+            WriteLowByteInt(&uaSendBuff[15 + i * 8], lengths[i], 4);
+        }
+        
+        int crc_len = 1 + 1 + 1 + data_len;
+        WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
+        
+        std::string result((char*)uaSendBuff, pack_len);
+        free(uaSendBuff);
+        return result;
+    }
+
+    // 从IP地址中提取板ID（取IP最后一段）
+    int IpToBoardId(const std::string& ip) {
+        std::vector<std::string> parts = split_single_char_delim(ip, '.');
+        if (parts.size() != 4) return -1;
+        return std::stoi(parts[3]);
+    }
+
+    // 根据板ID获取IP地址
+    std::string GetBoardIp(int iBoardId) {
+        std::lock_guard<std::mutex> lock_(data_rw_mutex);
+        auto it = mboards.find(iBoardId);
+        if (it != mboards.end()) {
+            return it->second.first.m_Ip;
+        }
+        return "";
+    }
+
+    // 发送EEPROM读请求
+    int ReadEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+        if (count <= 0 || addresses.size() == 0 || lengths.size() == 0) {
+            printf("ERROR: ReadEEPROM invalid parameters\n");
+            return -1;
+        }
+        
+        // 构造UDP包
+        std::string sPack = BuildEEPROMReadPack(iBoardId, addresses, lengths, count);
+        
+        // 获取板IP
+        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        if (sBdIpAddr.empty()) {
+            printf("ERROR: ReadEEPROM can't find BoardId %d\n", iBoardId);
+            return -1;
+        }
+        
+        // 初始化缓存
+        {
+            std::lock_guard<std::mutex> lock(eeprom_mutex);
+            m_eeprom_read_cache[iBoardId] = EEPROMReadCache();
+        }
+        
+        printf("DBG: ReadEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        
+        if (g_udp_server != nullptr) {
+            g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
+        } else {
+            std::cerr << "UDP server is not initialized!" << std::endl;
+            return -1;
+        }
+        return 0;
+    }
+
+    // 发送EEPROM写请求
+    int WriteEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<std::string>& hexData, int count) {
+        if (count <= 0 || addresses.size() == 0 || hexData.size() == 0) {
+            printf("ERROR: WriteEEPROM invalid parameters\n");
+            return -1;
+        }
+        
+        std::string sPack = BuildEEPROMWritePack(iBoardId, addresses, hexData, count);
+        
+        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        if (sBdIpAddr.empty()) {
+            printf("ERROR: WriteEEPROM can't find BoardId %d\n", iBoardId);
+            return -1;
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(eeprom_mutex);
+            m_eeprom_write_response[iBoardId] = EEPROMWriteResponse();
+        }
+        
+        printf("DBG: WriteEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        
+        if (g_udp_server != nullptr) {
+            g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
+        } else {
+            std::cerr << "UDP server is not initialized!" << std::endl;
+            return -1;
+        }
+        return 0;
+    }
+
+    // 发送EEPROM擦除请求
+    int EraseEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+        std::string sPack = BuildEEPROMErasePack(iBoardId, addresses, lengths, count);
+        
+        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        if (sBdIpAddr.empty()) {
+            printf("ERROR: EraseEEPROM can't find BoardId %d\n", iBoardId);
+            return -1;
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(eeprom_mutex);
+            m_eeprom_erase_response[iBoardId] = EEPROMEraseResponse();
+        }
+        
+        printf("DBG: EraseEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        
+        if (g_udp_server != nullptr) {
+            g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
+        } else {
+            std::cerr << "UDP server is not initialized!" << std::endl;
+            return -1;
+        }
+        return 0;
+    }
+
+    // 处理Eeprom响应（在OnUdpReceive中调用）
+    void OnEepromResponse(const char *pData, int iDataLen) {
+        if (iDataLen < 18) {
+            printf("ERROR: OnEepromResponse data too short\n");
+            return;
+        }
+        
+        unsigned char iCmd = (unsigned char)pData[4];     // 命令字 0x81
+        unsigned char iBoardId = (unsigned char)pData[6];  // 板ID（偏移6，因为第5字节是板负载状态）
+        unsigned char iChn = (unsigned char)pData[11];     // 通道号（偏移11，因为7-10是包顺序号）
+        
+        printf("DBG: OnEepromResponse cmd:0x%02X board:%d chn:0x%02X\n", iCmd, iBoardId, iChn);
+        
+        if (iCmd != 0x81) {
+            printf("ERROR: OnEepromResponse invalid cmd 0x%02X\n", iCmd);
+            return;
+        }
+        
+        // 数据位起始偏移: 帧头(4) + 命令字(1) + 板负载状态(1) + 板ID(1) + 包顺序号(4) + 通道号(1) + 占位字节(2) + 包数据长度(2) = 16
+        int data_offset = 16;
+        
+        if (iChn == EEPROM_READ) {
+            int offset = data_offset;
+            int data_count = ReadLowByteInt(&pData[offset], 4);
+            offset += 4;
+            
+            EepromReadCache cache;
+            cache.ready = true;
+            cache.error_code = 0;
+            cache.timestamp = std::time(nullptr);
+            
+            printf("DBG: Eeprom read response count:%d\n", data_count);
+            
+            for (int i = 0; i < data_count && offset + 8 <= iDataLen; i++) {
+                EepromReadEntry entry;
+                entry.address = ReadLowByteInt(&pData[offset], 4);
+                uint32_t data_len = ReadLowByteInt(&pData[offset + 4], 4);
+                offset += 8;
+                
+                if (offset + (int)data_len <= iDataLen) {
+                    entry.data = HexToStr((unsigned char*)&pData[offset], data_len, false);
+                    entry.timestamp = std::time(nullptr);
+                    offset += data_len;
+                }
+                cache.entries.push_back(entry);
+                
+                printf("DBG:   addr:0x%08X len:%d data:%s\n", 
+                       entry.address, data_len, entry.data.c_str());
+            }
+            
+            {
+                std::lock_guard<std::mutex> lock(eeprom_mutex);
+                m_eeprom_read_cache[iBoardId] = cache;
+                m_eeprom_read_cache[iBoardId].cv.notify_all();
+            }
+            
+        } else if (iChn == EEPROM_WRITE) {
+            int offset = data_offset;
+            int errcode = (unsigned char)pData[offset];
+            
+            EepromWriteResponse resp;
+            resp.ready = true;
+            resp.error_code = errcode;
+            if (errcode == 0x00) resp.error_msg = "success";
+            else if (errcode == 0x01) resp.error_msg = "address out of bounds";
+            else if (errcode == 0x02) resp.error_msg = "CRC error";
+            else resp.error_msg = "unknown error";
+            
+            printf("DBG: Eeprom write response errcode:0x%02X %s\n", errcode, resp.error_msg.c_str());
+            
+            {
+                std::lock_guard<std::mutex> lock(eeprom_mutex);
+                m_eeprom_write_response[iBoardId] = resp;
+                m_eeprom_write_response[iBoardId].cv.notify_all();
+            }
+            
+        } else if (iChn == EEPROM_ERASE) {
+            int offset = data_offset;
+            int errcode = (unsigned char)pData[offset];
+            
+            EepromEraseResponse resp;
+            resp.ready = true;
+            resp.error_code = errcode;
+            if (errcode == 0x00) resp.error_msg = "success";
+            else if (errcode == 0x01) resp.error_msg = "address out of bounds";
+            else if (errcode == 0x02) resp.error_msg = "CRC error";
+            else resp.error_msg = "unknown error";
+            
+            printf("DBG: Eeprom erase response errcode:0x%02X %s\n", errcode, resp.error_msg.c_str());
+            
+            {
+                std::lock_guard<std::mutex> lock(eeprom_mutex);
+                m_eeprom_erase_response[iBoardId] = resp;
+                m_eeprom_erase_response[iBoardId].cv.notify_all();
+            }
+        }
+    }
+    // 等待EEPROM读结果（供HTTP层调用）
+    bool WaitEEPROMReadResult(int iBoardId, EEPROMReadCache& result, int timeout_ms = 5000) {
+        std::unique_lock<std::mutex> lock(eeprom_mutex);
+        auto it = m_eeprom_read_cache.find(iBoardId);
+        if (it == m_eeprom_read_cache.end()) return false;
+        
+        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
+            [&it] { return it->second.ready; })) {
+            result = it->second;
+            return true;
+        }
+        return false; // 超时
+    }
+
+    // 等待EEPROM写结果（供HTTP层调用）
+    bool WaitEEPROMWriteResult(int iBoardId, EEPROMWriteResponse& result, int timeout_ms = 5000) {
+        std::unique_lock<std::mutex> lock(eeprom_mutex);
+        auto it = m_eeprom_write_response.find(iBoardId);
+        if (it == m_eeprom_write_response.end()) return false;
+        
+        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+            [&it] { return it->second.ready; })) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    // 等待EEPROM擦除结果（供HTTP层调用）
+    bool WaitEEPROMEraseResult(int iBoardId, EEPROMEraseResponse& result, int timeout_ms = 5000) {
+        std::unique_lock<std::mutex> lock(eeprom_mutex);
+        auto it = m_eeprom_erase_response.find(iBoardId);
+        if (it == m_eeprom_erase_response.end()) return false;
+        
+        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+            [&it] { return it->second.ready; })) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
     std::string getCurrentTime(uint32_t mode) {
         std::time_t now = std::time(nullptr);
         struct tm* localTime = std::localtime(&now);
@@ -912,6 +1313,14 @@ public:
         std::cout << "OnUdpReceive iHeader: " << iHeader << " iDataLen: " << iDataLen << " iDataLen" << std::endl;
         if(iHeader != 0x68FEFEFE) return; //包头错误
         unsigned char iCmd = (unsigned char)pData[4];
+        unsigned char iChn = (unsigned char)pData[6]; //通道号
+        
+        // 先判断是否是EEPROM响应（命令字0x81，通道号0x87/0x88/0x89）
+        if (iCmd == 0x81 && (iChn == EEPROM_READ || iChn == EEPROM_WRITE || iChn == EEPROM_ERASE)) {
+            OnEepromResponse(pData, iDataLen);
+            return;
+        }
+        
         std::string sPackStr = HexToStr((unsigned char *)pData, iDataLen, true);
         std::cout << "recv from: " << sFromAddr << " iDataLen: " << iDataLen << " value:" << sPackStr.c_str() << std::endl;
         if(iDataLen ==10) //长度为10的是控制层返回的包
@@ -1004,9 +1413,16 @@ public:
                                 it->second.first.m_iBibId = (int)ReadLowByteInt(PayData+iT*2,4); //bib id
                                 cal_data = find_data(it->second.first.m_iBibId);
                                 if (cal_data.size() > 0) {
-                                    std::cout << "cal_data size:%d" << cal_data.size() << std::endl;
+                                    std::cout << "cal_data size:" << cal_data.size() << std::endl;
+                                    for(auto iter : cal_data) {
+                                        std::cout << mboards[iPgbSlotId].first.m_iBibId << " " << iter.first << " ";
+                                        for(auto data : iter.second) {
+                                            std::cout << (double)data.first << " " << (double)data.second << " ";
+                                        }
+                                        std::cout << std::endl;
+                                    }
                                 } else {
-                                    std::cout << "Error: can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
+                                    std::cout << "Error: new_board can't find this bibid in calibration_map:bibid(" << mboards[iPgbSlotId].first.m_iBibId << std::endl;
                                 }
                             }
                         }

@@ -461,6 +461,264 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     mg_http_reply(c, 500, "Content-Type:application/json\r\n", "{\"statusCode\":\"500\"},{\"message\":\"Unknow Error\"}");
                 }
                 MG_INFO(("Debug: post ClearIP end:%ld\n", std::time(nullptr)));
+            } else if (mg_match(hm->uri, mg_str("/eeprom/read"), NULL)) {
+                MG_INFO(("Debug: post eeprom/read start:%ld\n", std::time(nullptr)));
+                try {
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    json jmsg = json::parse(body_str);
+                    
+                    if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("data") || !jmsg["data"].is_array()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json data\"}");
+                        return;
+                    }
+                    
+                    ip = jmsg["ip"].get<std::string>();
+                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    if (boardId < 0) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");
+                        return;
+                    }
+                    
+                    auto& data_arr = jmsg["data"];
+                    std::vector<uint32_t> addresses, lengths;
+                    for (auto& item : data_arr) {
+                        if (!item.contains("address") || !item.contains("length")) {
+                            mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"400\",\"message\":\"Invalid data item, need address and length\"}");
+                            return;
+                        }
+                        uint32_t addr = std::stoul(item["address"].get<std::string>(), nullptr, 16);
+                        uint32_t len = item["length"].get<uint32_t>();
+                        if (addr > 0xFFFF || addr + len > 0x10000) {
+                            mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"400\",\"message\":\"Address out of range (0x0000-0xFFFF)\"}");
+                            return;
+                        }
+                        addresses.push_back(addr);
+                        lengths.push_back(len);
+                    }
+                    
+                    int count = addresses.size();
+                    if (BoardManager->ReadEeprom(boardId, addresses, lengths, count) != 0) {
+                        mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"500\",\"message\":\"Send Eeprom read request failed\"}");
+                        return;
+                    }
+                    
+                    EepromReadCache result;
+                    if (BoardManager->WaitEepromReadResult(boardId, result, 5000)) {
+                        json response_data = json::array();
+                        for (auto& entry : result.entries) {
+                            json item;
+                            char addr_str[16];
+                            snprintf(addr_str, sizeof(addr_str), "%08X", entry.address);
+                            item["address"] = std::string(addr_str);
+                            item["data"] = entry.data;
+                            response_data.push_back(item);
+                        }
+                        json response_body;
+                        response_body["statusCode"] = "200";
+                        response_body["message"] = "read success";
+                        response_body["data"] = response_data;
+                        std::string json_str = response_body.dump();
+                        mg_http_reply(c, 200, "Content-Type:application/json\r\n", json_str.c_str());
+                    } else {
+                        mg_http_reply(c, 504, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"504\",\"message\":\"Eeprom read timeout\"}");
+                    }
+                } catch (const json::parse_error& e) {
+                    mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"400\",\"message\":\"Invalid JSON\"}");
+                } catch (const std::exception& e) {
+                    mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"500\",\"message\":\"Unknown Error\"}");
+                }
+                MG_INFO(("Debug: post eeprom/read end:%ld\n", std::time(nullptr)));
+                        } else if (mg_match(hm->uri, mg_str("/eeprom/write"), NULL)) {
+                MG_INFO(("Debug: post eeprom/write start:%ld\n", std::time(nullptr)));
+                try {
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    json jmsg = json::parse(body_str);
+                    
+                    if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("data") || !jmsg["data"].is_array()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json data\"}");
+                        return;
+                    }
+                    
+                    ip = jmsg["ip"].get<std::string>();
+                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    if (boardId < 0) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");
+                        return;
+                    }
+                    
+                    auto& data_arr = jmsg["data"];
+                    std::vector<uint32_t> addresses;
+                    std::vector<std::string> hexData;
+                    for (auto& item : data_arr) {
+                        if (!item.contains("address") || !item.contains("data")) {
+                            mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"400\",\"message\":\"Invalid data item, need address and data\"}");
+                            return;
+                        }
+                        uint32_t addr = std::stoul(item["address"].get<std::string>(), nullptr, 16);
+                        std::string data = item["data"].get<std::string>();
+                        if (addr > 0xFFFF) {
+                            mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"400\",\"message\":\"Address out of range (0x0000-0xFFFF)\"}");
+                            return;
+                        }
+                        if (data.length() % 2 != 0) {
+                            mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"400\",\"message\":\"Data length must be even (hex string)\"}");
+                            return;
+                        }
+                        addresses.push_back(addr);
+                        hexData.push_back(data);
+                    }
+                    
+                    int count = addresses.size();
+                    if (BoardManager->WriteEeprom(boardId, addresses, hexData, count) != 0) {
+                        mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"500\",\"message\":\"Send Eeprom write request failed\"}");
+                        return;
+                    }
+                    
+                    EepromWriteResponse result;
+                    if (BoardManager->WaitEepromWriteResult(boardId, result, 5000)) {
+                        if (result.error_code == 0) {
+                            mg_http_reply(c, 200, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"200\",\"message\":\"write success\"}");
+                        } else {
+                            json response_body;
+                            response_body["statusCode"] = "500";
+                            response_body["message"] = "write failed: " + result.error_msg;
+                            std::string json_str = response_body.dump();
+                            mg_http_reply(c, 500, "Content-Type:application/json\r\n", json_str.c_str());
+                        }
+                    } else {
+                        mg_http_reply(c, 504, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"504\",\"message\":\"Eeprom write timeout\"}");
+                    }
+                } catch (const json::parse_error& e) {
+                    mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"400\",\"message\":\"Invalid JSON\"}");
+                } catch (const std::exception& e) {
+                    mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"500\",\"message\":\"Unknown Error\"}");
+                }
+                MG_INFO(("Debug: post eeprom/write end:%ld\n", std::time(nullptr)));
+                        } else if (mg_match(hm->uri, mg_str("/eeprom/erase"), NULL)) {
+                MG_INFO(("Debug: post eeprom/erase start:%ld\n", std::time(nullptr)));
+                try {
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    json jmsg = json::parse(body_str);
+                    
+                    if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
+                        return;
+                    }
+                    if (!jmsg.contains("data") || !jmsg["data"].is_array()) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid Json data\"}");
+                        return;
+                    }
+                    
+                    ip = jmsg["ip"].get<std::string>();
+                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    if (boardId < 0) {
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");
+                        return;
+                    }
+                    
+                    auto& data_arr = jmsg["data"];
+                    std::vector<uint32_t> addresses, lengths;
+                    int count = data_arr.size();
+                    
+                    if (count == 0) {
+                        addresses.push_back(0x00000000);
+                        lengths.push_back(0x00010000);
+                        count = 1;
+                    } else {
+                        for (auto& item : data_arr) {
+                            if (!item.contains("address") || !item.contains("length")) {
+                                mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                    "{\"statusCode\":\"400\",\"message\":\"Invalid data item, need address and length\"}");
+                                return;
+                            }
+                            uint32_t addr = std::stoul(item["address"].get<std::string>(), nullptr, 16);
+                            uint32_t len = item["length"].get<uint32_t>();
+                            if (addr > 0xFFFF || addr + len > 0x10000) {
+                                mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                                    "{\"statusCode\":\"400\",\"message\":\"Address out of range (0x0000-0xFFFF)\"}");
+                                return;
+                            }
+                            addresses.push_back(addr);
+                            lengths.push_back(len);
+                        }
+                    }
+                    
+                    if (BoardManager->EraseEeprom(boardId, addresses, lengths, count) != 0) {
+                        mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"500\",\"message\":\"Send Eeprom erase request failed\"}");
+                        return;
+                    }
+                    
+                    EepromEraseResponse result;
+                    if (BoardManager->WaitEepromEraseResult(boardId, result, 5000)) {
+                        if (result.error_code == 0) {
+                            mg_http_reply(c, 200, "Content-Type:application/json\r\n", 
+                                "{\"statusCode\":\"200\",\"message\":\"erase success\"}");
+                        } else {
+                            json response_body;
+                            response_body["statusCode"] = "500";
+                            response_body["message"] = "erase failed: " + result.error_msg;
+                            std::string json_str = response_body.dump();
+                            mg_http_reply(c, 500, "Content-Type:application/json\r\n", json_str.c_str());
+                        }
+                    } else {
+                        mg_http_reply(c, 504, "Content-Type:application/json\r\n", 
+                            "{\"statusCode\":\"504\",\"message\":\"Eeprom erase timeout\"}");
+                    }
+                } catch (const json::parse_error& e) {
+                    mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"400\",\"message\":\"Invalid JSON\"}");
+                } catch (const std::exception& e) {
+                    mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
+                        "{\"statusCode\":\"500\",\"message\":\"Unknown Error\"}");
+                }
+                MG_INFO(("Debug: post eeprom/erase end:%ld\n", std::time(nullptr)));
             } else {
                 mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\"},{\"message\":\"Invalid uri\"}");
             }
