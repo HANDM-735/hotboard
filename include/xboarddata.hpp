@@ -540,7 +540,7 @@ public:
 
     // 构造EEPROM读请求包
     // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x87(1) + 数据个数(4) + [(起始地址(4) + 读取长度(4))...] + CRC16(2)
-    std::string BuildEEPROMReadPack(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    std::string BuildEepromReadPack(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
         int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 读取长度(4))
         int pack_len = 8 + data_len + 2; // 帧头(4) + 命令字(1) + 板ID(1) + 通道号(1) + 数据 + CRC16(2)
         unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
@@ -573,7 +573,7 @@ public:
 
     // 构造EEPROM写请求包
     // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x88(1) + 数据个数(4) + [(起始地址(4) + 写入长度(4) + 数据(N))...] + CRC16(2)
-    std::string BuildEEPROMWritePack(int iBoardId, const std::vector<uint32_t>& addresses, 
+    std::string BuildEepromWritePack(int iBoardId, const std::vector<uint32_t>& addresses, 
                                       const std::vector<std::string>& hexData, int count) {
         // 先计算总数据长度
         int total_data_len = 4; // 数据个数
@@ -621,7 +621,7 @@ public:
 
     // 构造EEPROM擦除请求包
     // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x89(1) + 数据个数(4) + [(起始地址(4) + 擦除长度(4))...] + CRC16(2)
-    std::string BuildEEPROMErasePack(int iBoardId, const std::vector<uint32_t>& addresses,
+    std::string BuildEepromErasePack(int iBoardId, const std::vector<uint32_t>& addresses,
                                       const std::vector<uint32_t>& lengths, int count) {
         int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 擦除长度(4))
         int pack_len = 8 + data_len + 2;
@@ -669,29 +669,29 @@ public:
     }
 
     // 发送EEPROM读请求
-    int ReadEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    int ReadEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0) {
-            printf("ERROR: ReadEEPROM invalid parameters\n");
+            printf("ERROR: ReadEeprom invalid parameters\n");
             return -1;
         }
         
         // 构造UDP包
-        std::string sPack = BuildEEPROMReadPack(iBoardId, addresses, lengths, count);
+        std::string sPack = BuildEepromReadPack(iBoardId, addresses, lengths, count);
         
         // 获取板IP
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
-            printf("ERROR: ReadEEPROM can't find BoardId %d\n", iBoardId);
+            printf("ERROR: ReadEeprom can't find BoardId %d\n", iBoardId);
             return -1;
         }
         
         // 初始化缓存
         {
             std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_read_cache[iBoardId] = EEPROMReadCache();
+            m_eeprom_read_cache[iBoardId] = EepromReadCache();
         }
         
-        printf("DBG: ReadEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        printf("DBG: ReadEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
         if (g_udp_server != nullptr) {
             g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
@@ -703,26 +703,26 @@ public:
     }
 
     // 发送EEPROM写请求
-    int WriteEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<std::string>& hexData, int count) {
+    int WriteEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<std::string>& hexData, int count) {
         if (count <= 0 || addresses.size() == 0 || hexData.size() == 0) {
-            printf("ERROR: WriteEEPROM invalid parameters\n");
+            printf("ERROR: WriteEeprom invalid parameters\n");
             return -1;
         }
         
-        std::string sPack = BuildEEPROMWritePack(iBoardId, addresses, hexData, count);
+        std::string sPack = BuildEepromWritePack(iBoardId, addresses, hexData, count);
         
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
-            printf("ERROR: WriteEEPROM can't find BoardId %d\n", iBoardId);
+            printf("ERROR: WriteEeprom can't find BoardId %d\n", iBoardId);
             return -1;
         }
         
         {
             std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_write_response[iBoardId] = EEPROMWriteResponse();
+            m_eeprom_write_response[iBoardId] = EepromWriteResponse();
         }
         
-        printf("DBG: WriteEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        printf("DBG: WriteEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
         if (g_udp_server != nullptr) {
             g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
@@ -734,21 +734,21 @@ public:
     }
 
     // 发送EEPROM擦除请求
-    int EraseEEPROM(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
-        std::string sPack = BuildEEPROMErasePack(iBoardId, addresses, lengths, count);
+    int EraseEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+        std::string sPack = BuildEepromErasePack(iBoardId, addresses, lengths, count);
         
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
-            printf("ERROR: EraseEEPROM can't find BoardId %d\n", iBoardId);
+            printf("ERROR: EraseEeprom can't find BoardId %d\n", iBoardId);
             return -1;
         }
         
         {
             std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_erase_response[iBoardId] = EEPROMEraseResponse();
+            m_eeprom_erase_response[iBoardId] = EepromEraseResponse();
         }
         
-        printf("DBG: EraseEEPROM board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
+        printf("DBG: EraseEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
         if (g_udp_server != nullptr) {
             g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
@@ -856,8 +856,8 @@ public:
             }
         }
     }
-    // 等待EEPROM读结果（供HTTP层调用）
-    bool WaitEEPROMReadResult(int iBoardId, EEPROMReadCache& result, int timeout_ms = 5000) {
+    // 等待Eeprom读结果（供HTTP层调用）
+    bool WaitEepromReadResult(int iBoardId, EepromReadCache& result, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(eeprom_mutex);
         auto it = m_eeprom_read_cache.find(iBoardId);
         if (it == m_eeprom_read_cache.end()) return false;
@@ -870,8 +870,8 @@ public:
         return false; // 超时
     }
 
-    // 等待EEPROM写结果（供HTTP层调用）
-    bool WaitEEPROMWriteResult(int iBoardId, EEPROMWriteResponse& result, int timeout_ms = 5000) {
+    // 等待Eeprom写结果（供HTTP层调用）
+    bool WaitEepromWriteResult(int iBoardId, EepromWriteResponse& result, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(eeprom_mutex);
         auto it = m_eeprom_write_response.find(iBoardId);
         if (it == m_eeprom_write_response.end()) return false;
@@ -884,8 +884,8 @@ public:
         return false;
     }
 
-    // 等待EEPROM擦除结果（供HTTP层调用）
-    bool WaitEEPROMEraseResult(int iBoardId, EEPROMEraseResponse& result, int timeout_ms = 5000) {
+    // 等待Eeprom擦除结果（供HTTP层调用）
+    bool WaitEepromEraseResult(int iBoardId, EepromEraseResponse& result, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(eeprom_mutex);
         auto it = m_eeprom_erase_response.find(iBoardId);
         if (it == m_eeprom_erase_response.end()) return false;
