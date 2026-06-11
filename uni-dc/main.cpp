@@ -464,7 +464,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
             } else if (mg_match(hm->uri, mg_str("/eeprom/read"), NULL)) {
                 MG_INFO(("Debug: post eeprom/read start:%ld\n", std::time(nullptr)));
                 try {
-                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf), hm->body.len);
                     json jmsg = json::parse(body_str);
                     
                     if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
@@ -472,7 +472,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
                         return;
                     }
-                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_number_integer()) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
                         return;
@@ -484,7 +484,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     ip = jmsg["ip"].get<std::string>();
-                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    int boardId = jmsg["slot_id"].get<int>();
                     if (boardId < 0) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");
@@ -546,10 +546,10 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                         "{\"statusCode\":\"500\",\"message\":\"Unknown Error\"}");
                 }
                 MG_INFO(("Debug: post eeprom/read end:%ld\n", std::time(nullptr)));
-                        } else if (mg_match(hm->uri, mg_str("/eeprom/write"), NULL)) {
+            } else if (mg_match(hm->uri, mg_str("/eeprom/write"), NULL)) {
                 MG_INFO(("Debug: post eeprom/write start:%ld\n", std::time(nullptr)));
                 try {
-                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf), hm->body.len);
                     json jmsg = json::parse(body_str);
                     
                     if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
@@ -557,7 +557,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
                         return;
                     }
-                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_number_integer()) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
                         return;
@@ -569,7 +569,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     ip = jmsg["ip"].get<std::string>();
-                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    int boardId = jmsg["slot_id"].get<int>();
                     if (boardId < 0) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");
@@ -577,32 +577,36 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     auto& data_arr = jmsg["data"];
-                    std::vector<uint32_t> addresses;
-                    std::vector<std::string> hexData;
+                    std::vector<uint32_t> addresses, lengths;
+                    std::vector<std::vector<uint8_t>> hexData;
                     for (auto& item : data_arr) {
-                        if (!item.contains("address") || !item.contains("data")) {
+                        if (!item.contains("address") || !item.contains("length") || !item.contains("data")) {
                             mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
-                                "{\"statusCode\":\"400\",\"message\":\"Invalid data item, need address and data\"}");
+                                "{\"statusCode\":\"400\",\"message\":\"Invalid data item, need address, length and data\"}");
                             return;
                         }
                         uint32_t addr = std::stoul(item["address"].get<std::string>(), nullptr, 16);
-                        std::string data = item["data"].get<std::string>();
+                        uint32_t len = item["length"].get<uint32_t>();
+                        std::string data_str = item["data"].get<std::string>();
                         if (addr > 0xFFFF) {
                             mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                                 "{\"statusCode\":\"400\",\"message\":\"Address out of range (0x0000-0xFFFF)\"}");
                             return;
                         }
-                        if (data.length() % 2 != 0) {
+                        if (data_str.length() % 2 != 0) {
                             mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                                 "{\"statusCode\":\"400\",\"message\":\"Data length must be even (hex string)\"}");
                             return;
                         }
+                        std::vector<uint8_t> data_bytes(data_str.length() / 2);
+                        XBoardManager::StrToHex(const_cast<char*>(data_str.c_str()), data_bytes.data(), data_str.length());
                         addresses.push_back(addr);
-                        hexData.push_back(data);
+                        lengths.push_back(len);
+                        hexData.push_back(data_bytes);
                     }
                     
                     int count = addresses.size();
-                    if (BoardManager->WriteEeprom(boardId, addresses, hexData, count) != 0) {
+                    if (BoardManager->WriteEeprom(boardId, addresses, lengths, hexData, count) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom write request failed\"}");
                         return;
@@ -632,10 +636,10 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                         "{\"statusCode\":\"500\",\"message\":\"Unknown Error\"}");
                 }
                 MG_INFO(("Debug: post eeprom/write end:%ld\n", std::time(nullptr)));
-                        } else if (mg_match(hm->uri, mg_str("/eeprom/erase"), NULL)) {
+            } else if (mg_match(hm->uri, mg_str("/eeprom/erase"), NULL)) {
                 MG_INFO(("Debug: post eeprom/erase start:%ld\n", std::time(nullptr)));
                 try {
-                    std::string body_str(reinterpret_cast<char*>(hm->body.buf, hm->body.len));
+                    std::string body_str(reinterpret_cast<char*>(hm->body.buf), hm->body.len);
                     json jmsg = json::parse(body_str);
                     
                     if (!jmsg.contains("ip") || !jmsg["ip"].is_string()) {
@@ -643,7 +647,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
                         return;
                     }
-                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_string()) {
+                    if (!jmsg.contains("slot_id") || !jmsg["slot_id"].is_number_integer()) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid Json slot_id\"}");
                         return;
@@ -655,7 +659,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     ip = jmsg["ip"].get<std::string>();
-                    int boardId = std::stoi(jmsg["slot_id"].get<std::string>());
+                    int boardId = jmsg["slot_id"].get<int>();
                     if (boardId < 0) {
                         mg_http_reply(c, 400, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"400\",\"message\":\"Invalid slot_id\"}");

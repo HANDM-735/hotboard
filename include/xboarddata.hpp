@@ -538,117 +538,50 @@ public:
 
     // ==================== EEPROM 操作 ====================
 
-    // 构造EEPROM读请求包
-    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x87(1) + 数据个数(4) + [(起始地址(4) + 读取长度(4))...] + CRC16(2)
-    std::string BuildEepromReadPack(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
-        int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 读取长度(4))
-        int pack_len = 8 + data_len + 2; // 帧头(4) + 命令字(1) + 板ID(1) + 通道号(1) + 数据 + CRC16(2)
-        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
-        memset(uaSendBuff, 0, pack_len);
+    // 构造Eeprom请求包（通用）
+    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号(1) + 数据位 + CRC16(2)
+    // 读/擦除数据位: 数据个数(4) + [(起始地址(4) + 长度(4))...]
+    // 写数据位:     数据个数(4) + [(起始地址(4) + 长度(4) + 数据(N))...]
+    std::string BuildEepromPack(int iBoardId, int iChn, 
+                                 const std::vector<uint32_t>& addresses,
+                                 const std::vector<uint32_t>& lengths,
+                                 const std::vector<std::vector<uint8_t>>& hexData,
+                                 int count) {
+        // 计算数据区总长度
+        int data_len = 4; // 数据个数(4)
+        std::vector<int> data_bytes(count, 0);
+        for (int i = 0; i < count; i++) {
+            data_bytes[i] = (iChn == EEPROM_WRITE && i < (int)hexData.size()) 
+                            ? (int)hexData[i].size() : 0;
+            data_len += 4 + 4 + data_bytes[i]; // 起始地址(4) + 长度(4) + 数据(N)
+        }
         
-        // 帧头
+        int pack_len = 7 + data_len + 2;
+        std::vector<uint8_t> uaSendBuff(pack_len, 0);
+        
         uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
         uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
-        // 命令字 0x01 请求
         uaSendBuff[4] = 0x01;
-        // 板ID
-        uaSendBuff[5] = (unsigned char)iBoardId;
-        // 通道号 0x87 读eeprom
-        uaSendBuff[6] = EEPROM_READ;
-        // 数据位: 数据个数(4字节)
-        WriteLowByteInt(&uaSendBuff[7], count, 4);
-        // 数据位: (起始地址(4) + 读取长度(4)) * count
-        for (int i = 0; i < count; i++) {
-            WriteLowByteInt(&uaSendBuff[11 + i * 8], addresses[i], 4);
-            WriteLowByteInt(&uaSendBuff[15 + i * 8], lengths[i], 4);
-        }
-        // CRC16校验: 从命令字到数据区结束
-        int crc_len = 1 + 1 + 1 + data_len; // 命令字(1) + 板ID(1) + 通道号(1) + 数据
-        WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
+        uaSendBuff[5] = (uint8_t)iBoardId;
+        uaSendBuff[6] = (uint8_t)iChn;
         
-        std::string result((char*)uaSendBuff, pack_len);
-        free(uaSendBuff);
-        return result;
-    }
-
-    // 构造EEPROM写请求包
-    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x88(1) + 数据个数(4) + [(起始地址(4) + 写入长度(4) + 数据(N))...] + CRC16(2)
-    std::string BuildEepromWritePack(int iBoardId, const std::vector<uint32_t>& addresses, 
-                                      const std::vector<std::string>& hexData, int count) {
-        // 先计算总数据长度
-        int total_data_len = 4; // 数据个数
-        std::vector<int> data_bytes(count);
-        for (int i = 0; i < count; i++) {
-            data_bytes[i] = hexData[i].length() / 2; // 十六进制字符串转字节数
-            total_data_len += 4 + 4 + data_bytes[i]; // 起始地址(4) + 写入长度(4) + 数据(N)
-        }
-        int pack_len = 8 + total_data_len + 2; // 帧头(4) + 命令字(1) + 板ID(1) + 通道号(1) + 数据 + CRC16(2)
-        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
-        memset(uaSendBuff, 0, pack_len);
-        
-        // 帧头
-        uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
-        uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
-        uaSendBuff[4] = 0x01; // 命令字 请求
-        uaSendBuff[5] = (unsigned char)iBoardId;
-        uaSendBuff[6] = EEPROM_WRITE; // 通道号 0x88 写eeprom
-        
-        // 数据个数
         WriteLowByteInt(&uaSendBuff[7], count, 4);
         
-        // 数据位
         int offset = 11;
         for (int i = 0; i < count; i++) {
-            WriteLowByteInt(&uaSendBuff[offset], addresses[i], 4); // 起始地址
-            WriteLowByteInt(&uaSendBuff[offset + 4], data_bytes[i], 4); // 写入长度
-            // 将十六进制字符串转为二进制数据
-            unsigned char* tmpData = (unsigned char*)malloc(data_bytes[i]);
-            memset(tmpData, 0, data_bytes[i]);
-            StrToHex((char*)hexData[i].c_str(), tmpData, hexData[i].length());
-            memcpy(&uaSendBuff[offset + 8], tmpData, data_bytes[i]);
-            free(tmpData);
-            offset += 8 + data_bytes[i];
-        }
-        
-        // CRC16校验
-        int crc_len = 1 + 1 + 1 + total_data_len;
-        WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
-        
-        std::string result((char*)uaSendBuff, pack_len);
-        free(uaSendBuff);
-        return result;
-    }
-
-    // 构造EEPROM擦除请求包
-    // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号0x89(1) + 数据个数(4) + [(起始地址(4) + 擦除长度(4))...] + CRC16(2)
-    std::string BuildEepromErasePack(int iBoardId, const std::vector<uint32_t>& addresses,
-                                      const std::vector<uint32_t>& lengths, int count) {
-        int data_len = 4 + count * 8; // 数据个数(4) + count * (起始地址(4) + 擦除长度(4))
-        int pack_len = 8 + data_len + 2;
-        unsigned char* uaSendBuff = (unsigned char*)malloc(pack_len);
-        memset(uaSendBuff, 0, pack_len);
-        
-        uaSendBuff[0] = 0xFE; uaSendBuff[1] = 0xFE;
-        uaSendBuff[2] = 0xFE; uaSendBuff[3] = 0x68;
-        uaSendBuff[4] = 0x01;
-        uaSendBuff[5] = (unsigned char)iBoardId;
-        uaSendBuff[6] = EEPROM_ERASE;
-        
-        // 数据个数
-        WriteLowByteInt(&uaSendBuff[7], count, 4);
-        
-        // 数据位: (起始地址(4) + 擦除长度(4)) * count
-        for (int i = 0; i < count; i++) {
-            WriteLowByteInt(&uaSendBuff[11 + i * 8], addresses[i], 4);
-            WriteLowByteInt(&uaSendBuff[15 + i * 8], lengths[i], 4);
+            WriteLowByteInt(&uaSendBuff[offset], addresses[i], 4);
+            WriteLowByteInt(&uaSendBuff[offset + 4], lengths[i], 4);
+            offset += 8;
+            if (iChn == EEPROM_WRITE && i < (int)hexData.size() && data_bytes[i] > 0) {
+                memcpy(&uaSendBuff[offset], hexData[i].data(), hexData[i].size());
+                offset += data_bytes[i];
+            }
         }
         
         int crc_len = 1 + 1 + 1 + data_len;
         WriteLowByteInt(&uaSendBuff[pack_len - 2], GetCrc16(&uaSendBuff[4], crc_len), 2);
         
-        std::string result((char*)uaSendBuff, pack_len);
-        free(uaSendBuff);
-        return result;
+        return std::string((char*)uaSendBuff.data(), pack_len);
     }
 
     // 从IP地址中提取板ID（取IP最后一段）
@@ -676,8 +609,7 @@ public:
         }
         
         // 构造UDP包
-        std::string sPack = BuildEepromReadPack(iBoardId, addresses, lengths, count);
-        
+        std::string sPack = BuildEepromPack(iBoardId, EEPROM_READ, addresses, lengths, {}, count);
         // 获取板IP
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
@@ -703,13 +635,13 @@ public:
     }
 
     // 发送EEPROM写请求
-    int WriteEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<std::string>& hexData, int count) {
-        if (count <= 0 || addresses.size() == 0 || hexData.size() == 0) {
+    int WriteEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
+        if (count <= 0 || addresses.size() == 0 || lengths.size() == 0 || hexData.size() == 0) {
             printf("ERROR: WriteEeprom invalid parameters\n");
             return -1;
         }
         
-        std::string sPack = BuildEepromWritePack(iBoardId, addresses, hexData, count);
+        std::string sPack = BuildEepromPack(iBoardId, EEPROM_WRITE, addresses, lengths, hexData, count);
         
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
@@ -735,7 +667,7 @@ public:
 
     // 发送EEPROM擦除请求
     int EraseEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
-        std::string sPack = BuildEepromErasePack(iBoardId, addresses, lengths, count);
+        std::string sPack = BuildEepromPack(iBoardId, EEPROM_ERASE, addresses, lengths, {}, count);
         
         std::string sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
@@ -766,9 +698,9 @@ public:
             return;
         }
         
-        unsigned char iCmd = (unsigned char)pData[4];     // 命令字 0x81
-        unsigned char iBoardId = (unsigned char)pData[6];  // 板ID（偏移6，因为第5字节是板负载状态）
-        unsigned char iChn = (unsigned char)pData[11];     // 通道号（偏移11，因为7-10是包顺序号）
+        uint8_t iCmd = (uint8_t)pData[4];     // 命令字 0x81
+        uint8_t iBoardId = (uint8_t)pData[6];  // 板ID（偏移6，因为第5字节是板负载状态）
+        uint8_t iChn = (uint8_t)pData[11];     // 通道号（偏移11，因为7-10是包顺序号）
         
         printf("DBG: OnEepromResponse cmd:0x%02X board:%d chn:0x%02X\n", iCmd, iBoardId, iChn);
         
@@ -799,7 +731,7 @@ public:
                 offset += 8;
                 
                 if (offset + (int)data_len <= iDataLen) {
-                    entry.data = HexToStr((unsigned char*)&pData[offset], data_len, false);
+                    entry.data = HexToStr((uint8_t*)&pData[offset], data_len, false);
                     entry.timestamp = std::time(nullptr);
                     offset += data_len;
                 }
@@ -817,7 +749,7 @@ public:
             
         } else if (iChn == EEPROM_WRITE) {
             int offset = data_offset;
-            int errcode = (unsigned char)pData[offset];
+            int errcode = (uint8_t)pData[offset];
             
             EepromWriteResponse resp;
             resp.ready = true;
@@ -837,7 +769,7 @@ public:
             
         } else if (iChn == EEPROM_ERASE) {
             int offset = data_offset;
-            int errcode = (unsigned char)pData[offset];
+            int errcode = (uint8_t)pData[offset];
             
             EepromEraseResponse resp;
             resp.ready = true;
@@ -946,7 +878,7 @@ public:
             csvFile << std::setprecision(2) << std::fixed << record.bib_origin_temp[i] << ",";
         }
         size_t num_thermocouple_origin_temp = record.thermocouple_origin_temp.size();
-        for (size_t i = 0; i < num_thermocouple_origin_temp.size(); ++i) {
+        for (size_t i = 0; i < num_thermocouple_origin_temp; ++i) {
             csvFile << std::setprecision(2) << std::fixed << record.thermocouple_origin_temp[i] << ",";
         }
         size_t num_bib_temp_coefficient = record.bib_temp_coefficient.size();
@@ -956,12 +888,14 @@ public:
         }
         size_t num_thermocouple_temp_coefficient = record.thermocouple_temp_coefficient.size();
         for (size_t i = 0; i < num_thermocouple_temp_coefficient; ++i) {
-            csvFile << std::setprecision(10) << std::fixed << record.thermocouple_temp_coefficient[i].first << ","
-                    << record.thermocouple_temp_coefficient[i].second << std::endl;
-        } else {
-            csvFile << std::setprecision(10) << std::fixed << record.thermocouple_temp_coefficient[i].first << ","
-                    << record.thermocouple_temp_coefficient[i].second << " ,";
-        }
+            if (i == (num_thermocouple_temp_coefficient - 1)) {
+                csvFile << std::setprecision(10) << std::fixed << record.thermocouple_temp_coefficient[i].first << ","
+                        << record.thermocouple_temp_coefficient[i].second << std::endl;
+            } else {
+                csvFile << std::setprecision(10) << std::fixed << record.thermocouple_temp_coefficient[i].first << ","
+                        << record.thermocouple_temp_coefficient[i].second << ",";
+            }
+        } 
         csvFile.close();
     }
 
@@ -1911,5 +1845,11 @@ private:
     std::atomic<bool> running;
     std::mutex mtx;
     std::condition_variable cv;
+    
+    // EEPROM 响应缓存
+    std::map<int, EepromReadCache> m_eeprom_read_cache;
+    std::map<int, EepromWriteResponse> m_eeprom_write_response;
+    std::map<int, EepromEraseResponse> m_eeprom_erase_response;
+    std::mutex eeprom_mutex;
 };
 #endif // XBOARDDATA_H
