@@ -584,11 +584,11 @@ public:
         return std::string((char*)uaSendBuff.data(), pack_len);
     }
 
-    // 从IP地址中提取板ID（取IP最后一段）
+    // 从IP地址中提取板ID（取IP最后一段-150）
     int IpToBoardId(const std::string& ip) {
         std::vector<std::string> parts = split_single_char_delim(ip, '.');
         if (parts.size() != 4) return -1;
-        return std::stoi(parts[3]);
+        return std::stoi(parts[3]) - 150;
     }
 
     // 根据板ID获取IP地址
@@ -602,7 +602,7 @@ public:
     }
 
     // 发送EEPROM读请求
-    int ReadEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    int ReadEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0) {
             printf("ERROR: ReadEeprom invalid parameters\n");
             return -1;
@@ -611,7 +611,7 @@ public:
         // 构造UDP包
         std::string sPack = BuildEepromPack(iBoardId, EEPROM_READ, addresses, lengths, {}, count);
         // 获取板IP
-        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
             printf("ERROR: ReadEeprom can't find BoardId %d\n", iBoardId);
             return -1;
@@ -635,7 +635,7 @@ public:
     }
 
     // 发送EEPROM写请求
-    int WriteEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
+    int WriteEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0 || hexData.size() == 0) {
             printf("ERROR: WriteEeprom invalid parameters\n");
             return -1;
@@ -643,7 +643,7 @@ public:
         
         std::string sPack = BuildEepromPack(iBoardId, EEPROM_WRITE, addresses, lengths, hexData, count);
         
-        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
             printf("ERROR: WriteEeprom can't find BoardId %d\n", iBoardId);
             return -1;
@@ -666,10 +666,10 @@ public:
     }
 
     // 发送EEPROM擦除请求
-    int EraseEeprom(int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    int EraseEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
         std::string sPack = BuildEepromPack(iBoardId, EEPROM_ERASE, addresses, lengths, {}, count);
         
-        std::string sBdIpAddr = GetBoardIp(iBoardId);
+        sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
             printf("ERROR: EraseEeprom can't find BoardId %d\n", iBoardId);
             return -1;
@@ -714,15 +714,21 @@ public:
         
         if (iChn == EEPROM_READ) {
             int offset = data_offset;
+            int errcode = (uint8_t)pData[offset];
+            offset += 1;
             int data_count = ReadLowByteInt(&pData[offset], 4);
             offset += 4;
-            
+
             EepromReadCache cache;
             cache.ready = true;
-            cache.error_code = 0;
+            cache.error_code = errcode;
             cache.timestamp = std::time(nullptr);
-            
-            printf("DBG: Eeprom read response count:%d\n", data_count);
+            if (errcode == 0x00) cache.error_msg = "success";
+            else if (errcode == 0x01) cache.error_msg = "address out of bounds";
+            else if (errcode == 0x02) cache.error_msg = "CRC error";
+            else cache.error_msg = "unknown error";
+
+            printf("DBG: Eeprom read response errcode:0x%02X %s count:%d\n", errcode, cache.error_msg.c_str(), data_count);
             
             for (int i = 0; i < data_count && offset + 8 <= iDataLen; i++) {
                 EepromReadEntry entry;

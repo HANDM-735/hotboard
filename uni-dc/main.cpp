@@ -511,7 +511,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     int count = addresses.size();
-                    if (BoardManager->ReadEeprom(boardId, addresses, lengths, count) != 0) {
+                    if (BoardManager->ReadEeprom(ip, boardId, addresses, lengths, count) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom read request failed\"}");
                         return;
@@ -519,21 +519,29 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     
                     EepromReadCache result;
                     if (BoardManager->WaitEepromReadResult(boardId, result, 5000)) {
-                        json response_data = json::array();
-                        for (auto& entry : result.entries) {
-                            json item;
-                            char addr_str[16];
-                            snprintf(addr_str, sizeof(addr_str), "%08X", entry.address);
-                            item["address"] = std::string(addr_str);
-                            item["data"] = entry.data;
-                            response_data.push_back(item);
+                        if (result.error_code == 0) {
+                            json response_data = json::array();
+                            for (auto& entry : result.entries) {
+                                json item;
+                                char addr_str[16];
+                                snprintf(addr_str, sizeof(addr_str), "%08X", entry.address);
+                                item["address"] = std::string(addr_str);
+                                item["data"] = entry.data;
+                                response_data.push_back(item);
+                            }
+                            json response_body;
+                            response_body["statusCode"] = "200";
+                            response_body["message"] = "read success";
+                            response_body["data"] = response_data;
+                            std::string json_str = response_body.dump();
+                            mg_http_reply(c, 200, "Content-Type:application/json\r\n", json_str.c_str());
+                        } else {
+                            json response_body;
+                            response_body["statusCode"] = "500";
+                            response_body["message"] = "read failed: " + result.error_msg;
+                            std::string json_str = response_body.dump();
+                            mg_http_reply(c, 500, "Content-Type:application/json\r\n", json_str.c_str());
                         }
-                        json response_body;
-                        response_body["statusCode"] = "200";
-                        response_body["message"] = "read success";
-                        response_body["data"] = response_data;
-                        std::string json_str = response_body.dump();
-                        mg_http_reply(c, 200, "Content-Type:application/json\r\n", json_str.c_str());
                     } else {
                         mg_http_reply(c, 504, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"504\",\"message\":\"Eeprom read timeout\"}");
@@ -606,7 +614,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     int count = addresses.size();
-                    if (BoardManager->WriteEeprom(boardId, addresses, lengths, hexData, count) != 0) {
+                    if (BoardManager->WriteEeprom(ip, boardId, addresses, lengths, hexData, count) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom write request failed\"}");
                         return;
@@ -693,14 +701,14 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                         }
                     }
                     
-                    if (BoardManager->EraseEeprom(boardId, addresses, lengths, count) != 0) {
+                    if (BoardManager->EraseEeprom(ip, boardId, addresses, lengths, count) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom erase request failed\"}");
                         return;
                     }
                     
                     EepromEraseResponse result;
-                    if (BoardManager->WaitEepromEraseResult(boardId, result, 5000)) {
+                    if (BoardManager->WaitEepromEraseResult(ip, boardId, result, 5000)) {
                         if (result.error_code == 0) {
                             mg_http_reply(c, 200, "Content-Type:application/json\r\n", 
                                 "{\"statusCode\":\"200\",\"message\":\"erase success\"}");
