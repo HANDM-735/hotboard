@@ -9,10 +9,8 @@
 #include <stdio.h>
 #include <cstddef>
 #include <net/if.h>
-#include <string>
 #include <vector>
 #include <iostream>
-#include <vector>
 #include <array>
 #include <limits>
 #include <string>
@@ -21,6 +19,8 @@
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
+#include <memory>
+#include <unordered_map>
 #include <nlohmann/json.hpp>
 #include "udpserver.h"
 
@@ -61,8 +61,6 @@ struct EepromReadCache {
     bool ready;
     int error_code;
     std::string error_msg;
-    std::condition_variable cv;
-
     EepromReadCache() : timestamp(0), ready(false), error_code(0), error_msg("") {}
 };
 
@@ -71,18 +69,9 @@ struct EepromWriteResponse {
     std::string error_msg;
     bool ready;
     std::condition_variable cv;
-
     EepromWriteResponse() : error_code(-1), error_msg(""), ready(false) {}
 };
 
-struct EepromEraseResponse {
-    int error_code;
-    std::string error_msg;
-    bool ready;
-    std::condition_variable cv;
-
-    EepromEraseResponse() : error_code(-1), error_msg(""), ready(false) {}
-};
 
 struct DataRecord {
     std::string time;
@@ -602,7 +591,7 @@ public:
     }
 
     // 发送EEPROM读请求
-    int ReadEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    int ReadEeprom(const std::string& sBdIpAddr, int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0) {
             printf("ERROR: ReadEeprom invalid parameters\n");
             return -1;
@@ -611,16 +600,11 @@ public:
         // 构造UDP包
         std::string sPack = BuildEepromPack(iBoardId, EEPROM_READ, addresses, lengths, {}, count);
         // 获取板IP
-        sBdIpAddr = GetBoardIp(iBoardId);
-        if (sBdIpAddr.empty()) {
-            printf("ERROR: ReadEeprom can't find BoardId %d\n", iBoardId);
-            return -1;
-        }
-        
+        // sBdIpAddr = GetBoardIp(iBoardId);
         // 初始化缓存
         {
             std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_read_cache[iBoardId] = EepromReadCache();
+            m_eeprom_read_cache[iBoardId] = std::make_shared<EepromReadCache>();
         }
         
         printf("DBG: ReadEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
@@ -635,7 +619,7 @@ public:
     }
 
     // 发送EEPROM写请求
-    int WriteEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
+    int WriteEeprom(const std::string& sBdIpAddr, int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0 || hexData.size() == 0) {
             printf("ERROR: WriteEeprom invalid parameters\n");
             return -1;
@@ -643,44 +627,16 @@ public:
         
         std::string sPack = BuildEepromPack(iBoardId, EEPROM_WRITE, addresses, lengths, hexData, count);
         
-        sBdIpAddr = GetBoardIp(iBoardId);
+        // sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
             printf("ERROR: WriteEeprom can't find BoardId %d\n", iBoardId);
             return -1;
         }
-        
         {
             std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_write_response[iBoardId] = EepromWriteResponse();
+            m_eeprom_write_erase_response[iBoardId] = std::make_shared<EepromWeResponse>();
         }
-        
         printf("DBG: WriteEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
-        
-        if (g_udp_server != nullptr) {
-            g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
-        } else {
-            std::cerr << "UDP server is not initialized!" << std::endl;
-            return -1;
-        }
-        return 0;
-    }
-
-    // 发送EEPROM擦除请求
-    int EraseEeprom(const std::string& sBdIpAddr = "", int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
-        std::string sPack = BuildEepromPack(iBoardId, EEPROM_ERASE, addresses, lengths, {}, count);
-        
-        sBdIpAddr = GetBoardIp(iBoardId);
-        if (sBdIpAddr.empty()) {
-            printf("ERROR: EraseEeprom can't find BoardId %d\n", iBoardId);
-            return -1;
-        }
-        
-        {
-            std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_erase_response[iBoardId] = EepromEraseResponse();
-        }
-        
-        printf("DBG: EraseEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
         if (g_udp_server != nullptr) {
             g_udp_server->send_data(sPack, sBdIpAddr, REMOTE_PORT);
@@ -719,16 +675,16 @@ public:
             int data_count = ReadLowByteInt(&pData[offset], 4);
             offset += 4;
 
-            EepromReadCache cache;
-            cache.ready = true;
-            cache.error_code = errcode;
-            cache.timestamp = std::time(nullptr);
-            if (errcode == 0x00) cache.error_msg = "success";
-            else if (errcode == 0x01) cache.error_msg = "address out of bounds";
-            else if (errcode == 0x02) cache.error_msg = "CRC error";
-            else cache.error_msg = "unknown error";
+            auto cache = std::make_shared<EepromReadCache>();
+            cache->ready = true;
+            cache->error_code = errcode;
+            cache->timestamp = std::time(nullptr);
+            if (errcode == 0x00) cache->error_msg = "success";
+            else if (errcode == 0x01) cache->error_msg = "address out of bounds";
+            else if (errcode == 0x02) cache->error_msg = "CRC error";
+            else cache->error_msg = "unknown error";
 
-            printf("DBG: Eeprom read response errcode:0x%02X %s count:%d\n", errcode, cache.error_msg.c_str(), data_count);
+            printf("DBG: Eeprom read response errcode:0x%02X %s count:%d\n", errcode, cache->error_msg.c_str(), data_count);
             
             for (int i = 0; i < data_count && offset + 8 <= iDataLen; i++) {
                 EepromReadEntry entry;
@@ -741,100 +697,71 @@ public:
                     entry.timestamp = std::time(nullptr);
                     offset += data_len;
                 }
-                cache.entries.push_back(entry);
+                cache->entries.push_back(entry);
                 
                 printf("DBG:   addr:0x%08X len:%d data:%s\n", 
                        entry.address, data_len, entry.data.c_str());
             }
-            
             {
                 std::lock_guard<std::mutex> lock(eeprom_mutex);
                 m_eeprom_read_cache[iBoardId] = cache;
-                m_eeprom_read_cache[iBoardId].cv.notify_all();
+                cache->cv.notify_all();
             }
             
-        } else if (iChn == EEPROM_WRITE) {
+        } else if (iChn == EEPROM_WRITE || iChn == EEPROM_ERASE) {
             int offset = data_offset;
             int errcode = (uint8_t)pData[offset];
             
-            EepromWriteResponse resp;
-            resp.ready = true;
-            resp.error_code = errcode;
-            if (errcode == 0x00) resp.error_msg = "success";
-            else if (errcode == 0x01) resp.error_msg = "address out of bounds";
-            else if (errcode == 0x02) resp.error_msg = "CRC error";
-            else resp.error_msg = "unknown error";
-            
-            printf("DBG: Eeprom write response errcode:0x%02X %s\n", errcode, resp.error_msg.c_str());
-            
+            auto resp = std::make_shared<EepromWeResponse>();
+            resp->ready = true;
+            resp->error_code = errcode;
+            if (errcode == 0x00) resp->error_msg = "success";
+            else if (errcode == 0x01) resp->error_msg = "address out of bounds";
+            else if (errcode == 0x02) resp->error_msg = "CRC error";
+            else resp->error_msg = "unknown error";
+            if (iChn == EEPROM_WRITE)
+                printf("DBG: Eeprom write response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
+            else if (iChn == EEPROM_ERASE)
+                printf("DBG: Eeprom erase response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
+
             {
                 std::lock_guard<std::mutex> lock(eeprom_mutex);
-                m_eeprom_write_response[iBoardId] = resp;
-                m_eeprom_write_response[iBoardId].cv.notify_all();
+                m_eeprom_write_erase_response[iBoardId] = resp;
+                resp->cv.notify_all();
             }
             
-        } else if (iChn == EEPROM_ERASE) {
-            int offset = data_offset;
-            int errcode = (uint8_t)pData[offset];
-            
-            EepromEraseResponse resp;
-            resp.ready = true;
-            resp.error_code = errcode;
-            if (errcode == 0x00) resp.error_msg = "success";
-            else if (errcode == 0x01) resp.error_msg = "address out of bounds";
-            else if (errcode == 0x02) resp.error_msg = "CRC error";
-            else resp.error_msg = "unknown error";
-            
-            printf("DBG: Eeprom erase response errcode:0x%02X %s\n", errcode, resp.error_msg.c_str());
-            
-            {
-                std::lock_guard<std::mutex> lock(eeprom_mutex);
-                m_eeprom_erase_response[iBoardId] = resp;
-                m_eeprom_erase_response[iBoardId].cv.notify_all();
-            }
         }
     }
     // 等待Eeprom读结果（供HTTP层调用）
-    bool WaitEepromReadResult(int iBoardId, EepromReadCache& result, int timeout_ms = 5000) {
+    bool WaitEepromReadResult(int iBoardId, std::shared_ptr<EepromReadCache>& result, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(eeprom_mutex);
         auto it = m_eeprom_read_cache.find(iBoardId);
-        if (it == m_eeprom_read_cache.end()) return false;
-        
+        if (it == m_eeprom_read_cache.end() || !it->second) return false;
+        auto ptr = it->second;
         if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
-            [&it] { return it->second.ready; })) {
-            result = it->second;
+            [ptr] { return ptr->ready; })) {
+            result = ptr;
             return true;
         }
         return false; // 超时
     }
 
-    // 等待Eeprom写结果（供HTTP层调用）
-    bool WaitEepromWriteResult(int iBoardId, EepromWriteResponse& result, int timeout_ms = 5000) {
+    // 等待Eeprom写/擦除结果（供HTTP层调用）
+    bool WaitEepromWriteEraseResult(int iBoardId, std::shared_ptr<EepromWeResponse>& result, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(eeprom_mutex);
-        auto it = m_eeprom_write_response.find(iBoardId);
-        if (it == m_eeprom_write_response.end()) return false;
+        auto it = m_eeprom_write_erase_response.find(iBoardId);
+        if (it == m_eeprom_write_erase_response.end() || !it->second) return false;
         
-        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-            [&it] { return it->second.ready; })) {
-            result = it->second;
+        auto ptr = it->second;
+        if (ptr->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+            [ptr] { return ptr->ready; })) {
+            result = ptr;
             return true;
         }
         return false;
     }
 
-    // 等待Eeprom擦除结果（供HTTP层调用）
-    bool WaitEepromEraseResult(int iBoardId, EepromEraseResponse& result, int timeout_ms = 5000) {
-        std::unique_lock<std::mutex> lock(eeprom_mutex);
-        auto it = m_eeprom_erase_response.find(iBoardId);
-        if (it == m_eeprom_erase_response.end()) return false;
-        
-        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-            [&it] { return it->second.ready; })) {
-            result = it->second;
-            return true;
-        }
-        return false;
-    }
+    
 
     std::string getCurrentTime(uint32_t mode) {
         std::time_t now = std::time(nullptr);
@@ -1638,7 +1565,7 @@ public:
         }
     }
 
-    std::map<int,vector<std::pair<double, double>>> find_data(int id)
+    std::map<int,std::vector<std::pair<double, double>>> find_data(int id)
     {
         std::unique_lock<std::mutex> lock(calibration_map_mutex);
         auto itdata = calibration_map.find(id);
@@ -1854,8 +1781,7 @@ private:
     
     // EEPROM 响应缓存
     std::map<int, EepromReadCache> m_eeprom_read_cache;
-    std::map<int, EepromWriteResponse> m_eeprom_write_response;
-    std::map<int, EepromEraseResponse> m_eeprom_erase_response;
+    std::map<int, EepromWeResponse> m_eeprom_write_response; // 写响应EepromWritePesponse,和擦除响应EepromEraseResponse合在一起
     std::mutex eeprom_mutex;
 };
 #endif // XBOARDDATA_H
