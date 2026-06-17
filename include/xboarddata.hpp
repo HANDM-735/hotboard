@@ -46,7 +46,6 @@ extern "C" {
 using json = nlohmann::json;
 
 extern UDPServer* g_udp_server;
-std::string m_save_path;
 
 // EEPROM响应缓存结构
 struct EepromReadEntry {
@@ -61,15 +60,34 @@ struct EepromReadCache {
     bool ready;
     int error_code;
     std::string error_msg;
+    std::condition_variable cv;
+    std::mutex mtx;
     EepromReadCache() : timestamp(0), ready(false), error_code(0), error_msg("") {}
+    // ✅ 修复：添加clear()方法，唯一正确的重置方式
+    void clear() {
+        std::lock_guard<std::mutex> lock(mtx);
+        entries.clear();
+        timestamp = 0;
+        error_code = 0;
+        error_msg.clear();
+        ready = false;
+    }
 };
 
-struct EepromWriteResponse {
+struct EepromWeResponse {
     int error_code;
     std::string error_msg;
     bool ready;
+    std::mutex mtx;
     std::condition_variable cv;
-    EepromWriteResponse() : error_code(-1), error_msg(""), ready(false) {}
+    EepromWeResponse() : error_code(-1), error_msg(""), ready(false) {}
+    // ✅ 修复：添加clear()方法
+    void clear() {
+        std::lock_guard<std::mutex> lock(mtx);
+        error_code = -1;
+        error_msg.clear();
+        ready = false;
+    }
 };
 
 
@@ -163,6 +181,24 @@ private:
     ~XBoardManager() {
         std::lock_guard<std::mutex> lock_(data_rw_mutex);
         mboards.clear();
+    }
+    // ✅ 修复：添加统一的缓存获取函数，永远不替换指针
+    std::shared_ptr<EepromReadCache> get_or_create_read_cache(int slotId) {
+        std::lock_guard<std::mutex> lock(eeprom_mutex);
+        auto& ptr = m_eeprom_read_cache[slotId];
+        if (!ptr) {
+            ptr = std::make_shared<EepromReadCache>();
+        }
+        return ptr;
+    }
+
+    std::shared_ptr<EepromWeResponse> get_or_create_we_cache(int slotId) {
+        std::lock_guard<std::mutex> lock(eeprom_mutex);
+        auto& ptr = m_eeprom_write_erase_response[slotId];
+        if (!ptr) {
+            ptr = std::make_shared<EepromWeResponse>();
+        }
+        return ptr;
     }
 public:
     XBoardManager(const XBoardManager&) = delete;
@@ -287,13 +323,13 @@ public:
         else    return (int)(((*pTmpMem)<<24)&0xFF000000)|((pTmpMem[1]<<16)&0xFF0000)|((pTmpMem[2]<<8)&0xFF00)|(pTmpMem[3]&0xFF);
     }
 
-    static int ReadLowByteInt(const void *pMemAddr,int iBytesNum)
+    static uint32_t ReadLowByteInt(const void *pMemAddr,int iBytesNum)
     {
         unsigned char *pTmpMem = (unsigned char *)pMemAddr;
-        if(iBytesNum ==1)    return (int)(*pTmpMem);
-        else if(iBytesNum ==2)    return (int)(((*pTmpMem[1])<<8)&0xFF00)|(pTmpMem[0]&0xFF);
-        else if(iBytesNum ==3)    return (int)(((*pTmpMem[2])<<16)&0xFF0000)|((pTmpMem[1]<<8)&0xFF00)|(pTmpMem[0]&0xFF);
-        else    return (int)(((*pTmpMem[3])<<24)&0xFF000000)|((pTmpMem[2]<<16)&0xFF0000)|((pTmpMem[1]<<8)&0xFF00)|(pTmpMem[0]&0xFF);
+        if(iBytesNum ==1)    return (uint32_t)(*pTmpMem);
+        else if(iBytesNum ==2)    return (uint32_t)(((*pTmpMem[1])<<8)&0xFF00)|(pTmpMem[0]&0xFF);
+        else if(iBytesNum ==3)    return (uint32_t)(((*pTmpMem[2])<<16)&0xFF0000)|((pTmpMem[1]<<8)&0xFF00)|(pTmpMem[0]&0xFF);
+        else    return (uint32_t)(((*pTmpMem[3])<<24)&0xFF000000)|((pTmpMem[2]<<16)&0xFF0000)|((pTmpMem[1]<<8)&0xFF00)|(pTmpMem[0]&0xFF);
     }
 
     static void WriteHighByteInt(void *pMemAddr, int iValue, int iBytesNum)
@@ -531,11 +567,10 @@ public:
     // 协议格式: 帧头(4) + 命令字0x01(1) + 板ID(1) + 通道号(1) + 数据位 + CRC16(2)
     // 读/擦除数据位: 数据个数(4) + [(起始地址(4) + 长度(4))...]
     // 写数据位:     数据个数(4) + [(起始地址(4) + 长度(4) + 数据(N))...]
-    std::string BuildEepromPack(int iBoardId, int iChn, 
+    std::string BuildEepromPack(int iBoardId, int iChn, int count, 
                                  const std::vector<uint32_t>& addresses,
                                  const std::vector<uint32_t>& lengths,
-                                 const std::vector<std::vector<uint8_t>>& hexData,
-                                 int count) {
+                                 const std::vector<std::vector<uint8_t>>& hexData) {
         // 计算数据区总长度
         int data_len = 4; // 数据个数(4)
         std::vector<int> data_bytes(count, 0);
@@ -591,21 +626,20 @@ public:
     }
 
     // 发送EEPROM读请求
-    int ReadEeprom(const std::string& sBdIpAddr, int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, int count) {
+    int ReadEeprom(const std::string& sBdIpAddr, int iBoardId, int count, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0) {
             printf("ERROR: ReadEeprom invalid parameters\n");
             return -1;
         }
         
         // 构造UDP包
-        std::string sPack = BuildEepromPack(iBoardId, EEPROM_READ, addresses, lengths, {}, count);
+        std::string sPack = BuildEepromPack(iBoardId, EEPROM_READ, count, addresses, lengths, {});
         // 获取板IP
         // sBdIpAddr = GetBoardIp(iBoardId);
         // 初始化缓存
-        {
-            std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_read_cache[iBoardId] = std::make_shared<EepromReadCache>();
-        }
+        // ✅ 修复：不再替换指针，只重置缓存内容，彻底解决死锁
+        auto cache = get_or_create_read_cache(iBoardId);
+        cache->clear();
         
         printf("DBG: ReadEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
@@ -619,23 +653,22 @@ public:
     }
 
     // 发送EEPROM写请求
-    int WriteEeprom(const std::string& sBdIpAddr, int iBoardId, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData, int count) {
+    int WriteEeprom(const std::string& sBdIpAddr, int iBoardId, int count, const std::vector<uint32_t>& addresses, const std::vector<uint32_t>& lengths, const std::vector<std::vector<uint8_t>>& hexData = {}) {
         if (count <= 0 || addresses.size() == 0 || lengths.size() == 0 || hexData.size() == 0) {
             printf("ERROR: WriteEeprom invalid parameters\n");
             return -1;
         }
         
-        std::string sPack = BuildEepromPack(iBoardId, EEPROM_WRITE, addresses, lengths, hexData, count);
+        std::string sPack = BuildEepromPack(iBoardId, EEPROM_WRITE, count, addresses, lengths, hexData);
         
         // sBdIpAddr = GetBoardIp(iBoardId);
         if (sBdIpAddr.empty()) {
             printf("ERROR: WriteEeprom can't find BoardId %d\n", iBoardId);
             return -1;
         }
-        {
-            std::lock_guard<std::mutex> lock(eeprom_mutex);
-            m_eeprom_write_erase_response[iBoardId] = std::make_shared<EepromWeResponse>();
-        }
+        // ✅ 修复：不再替换指针，只重置缓存内容
+        auto cache = get_or_create_we_cache(iBoardId);
+        cache->clear();
         printf("DBG: WriteEeprom board:%d ip:%s count:%d\n", iBoardId, sBdIpAddr.c_str(), count);
         
         if (g_udp_server != nullptr) {
@@ -675,17 +708,10 @@ public:
             int data_count = ReadLowByteInt(&pData[offset], 4);
             offset += 4;
 
-            auto cache = std::make_shared<EepromReadCache>();
-            cache->ready = true;
-            cache->error_code = errcode;
-            cache->timestamp = std::time(nullptr);
-            if (errcode == 0x00) cache->error_msg = "success";
-            else if (errcode == 0x01) cache->error_msg = "address out of bounds";
-            else if (errcode == 0x02) cache->error_msg = "CRC error";
-            else cache->error_msg = "unknown error";
+            printf("DBG: Eeprom read response errcode:0x%02X count:%d\n", errcode, data_count);
 
-            printf("DBG: Eeprom read response errcode:0x%02X %s count:%d\n", errcode, cache->error_msg.c_str(), data_count);
-            
+            // 无锁解析 entries
+            std::vector<EepromReadEntry> entries;
             for (int i = 0; i < data_count && offset + 8 <= iDataLen; i++) {
                 EepromReadEntry entry;
                 entry.address = ReadLowByteInt(&pData[offset], 4);
@@ -697,36 +723,49 @@ public:
                     entry.timestamp = std::time(nullptr);
                     offset += data_len;
                 }
-                cache->entries.push_back(entry);
-                
-                printf("DBG:   addr:0x%08X len:%d data:%s\n", 
-                       entry.address, data_len, entry.data.c_str());
+                // printf("DBG:addr:0x%08X len:%d data:%s\n", entry.address, data_len, entry.data.c_str());
+                entries.push_back(entry);               
             }
+
+            // 细粒度加锁：全局锁获取 shared_ptr，缓存锁更新数据
             {
-                std::lock_guard<std::mutex> lock(eeprom_mutex);
-                m_eeprom_read_cache[iBoardId] = cache;
+                std::shared_ptr<EepromReadCache> cache;
+                {
+                    std::lock_guard<std::mutex> lock(eeprom_mutex);
+                    auto& ref = m_eeprom_read_cache[iBoardId];
+                    if (!ref) ref = std::make_shared<EepromReadCache>();
+                    cache = ref;
+                }
+                std::lock_guard<std::mutex> lock(cache->mtx);
+                cache->ready = true;
+                cache->error_code = errcode;
+                cache->timestamp = std::time(nullptr);
+                if (errcode == 0x00) cache->error_msg = "success";
+                else if (errcode == 0x01) cache->error_msg = "address out of bounds";
+                else if (errcode == 0x02) cache->error_msg = "CRC error";
+                else cache->error_msg = "unknown error";
+                cache->entries = std::move(entries);
                 cache->cv.notify_all();
             }
             
         } else if (iChn == EEPROM_WRITE || iChn == EEPROM_ERASE) {
             int offset = data_offset;
             int errcode = (uint8_t)pData[offset];
-            
-            auto resp = std::make_shared<EepromWeResponse>();
-            resp->ready = true;
-            resp->error_code = errcode;
-            if (errcode == 0x00) resp->error_msg = "success";
-            else if (errcode == 0x01) resp->error_msg = "address out of bounds";
-            else if (errcode == 0x02) resp->error_msg = "CRC error";
-            else resp->error_msg = "unknown error";
-            if (iChn == EEPROM_WRITE)
-                printf("DBG: Eeprom write response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
-            else if (iChn == EEPROM_ERASE)
-                printf("DBG: Eeprom erase response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
-
+            // 加锁原地更新
             {
                 std::lock_guard<std::mutex> lock(eeprom_mutex);
-                m_eeprom_write_erase_response[iBoardId] = resp;
+                auto& resp = m_eeprom_write_erase_response[iBoardId];
+                if (!resp) resp = std::make_shared<EepromWeResponse>();
+                resp->ready = true;
+                resp->error_code = errcode;
+                if (errcode == 0x00) resp->error_msg = "success";
+                else if (errcode == 0x01) resp->error_msg = "address out of bounds";
+                else if (errcode == 0x02) resp->error_msg = "CRC error";
+                else resp->error_msg = "unknown error";
+                if (iChn == EEPROM_WRITE)
+                    printf("DBG: Eeprom write response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
+                else if (iChn == EEPROM_ERASE)
+                    printf("DBG: Eeprom erase response errcode:0x%02X %s\n", errcode, resp->error_msg.c_str());
                 resp->cv.notify_all();
             }
             
@@ -734,11 +773,17 @@ public:
     }
     // 等待Eeprom读结果（供HTTP层调用）
     bool WaitEepromReadResult(int iBoardId, std::shared_ptr<EepromReadCache>& result, int timeout_ms = 5000) {
-        std::unique_lock<std::mutex> lock(eeprom_mutex);
-        auto it = m_eeprom_read_cache.find(iBoardId);
-        if (it == m_eeprom_read_cache.end() || !it->second) return false;
-        auto ptr = it->second;
-        if (it->second.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
+        // 第1步：全局锁只用来获取 shared_ptr（<1μs）
+        std::shared_ptr<EepromReadCache> ptr;
+        {
+            std::lock_guard<std::mutex> lock(eeprom_mutex);
+            auto it = m_eeprom_read_cache.find(iBoardId);
+            if (it == m_eeprom_read_cache.end() || !it->second) return false;
+            ptr = it->second;
+        }
+        // 第2步：用缓存自己的锁和自己的 cv 等待，不影响其他板卡
+        std::unique_lock<std::mutex> lock(ptr->mtx);
+        if (ptr->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), 
             [ptr] { return ptr->ready; })) {
             result = ptr;
             return true;
@@ -748,11 +793,16 @@ public:
 
     // 等待Eeprom写/擦除结果（供HTTP层调用）
     bool WaitEepromWriteEraseResult(int iBoardId, std::shared_ptr<EepromWeResponse>& result, int timeout_ms = 5000) {
-        std::unique_lock<std::mutex> lock(eeprom_mutex);
-        auto it = m_eeprom_write_erase_response.find(iBoardId);
-        if (it == m_eeprom_write_erase_response.end() || !it->second) return false;
-        
-        auto ptr = it->second;
+        // 第1步：全局锁只用来获取 shared_ptr（<1μs）
+        std::shared_ptr<EepromWeResponse> ptr;
+        {
+            std::lock_guard<std::mutex> lock(eeprom_mutex);
+            auto it = m_eeprom_write_erase_response.find(iBoardId);
+            if (it == m_eeprom_write_erase_response.end() || !it->second) return false;
+            ptr = it->second;
+        }
+        // 第2步：用缓存自己的锁和自己的 cv 等待，不影响其他板卡
+        std::unique_lock<std::mutex> lock(ptr->mtx);
         if (ptr->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
             [ptr] { return ptr->ready; })) {
             result = ptr;
@@ -1193,7 +1243,6 @@ public:
         if(iDataLen ==10) //长度为10的是控制层返回的包
         {
             unsigned char iPgbSlotId = (unsigned char)pData[5]; //PGB板ID
-            unsigned char iChn = (unsigned char)pData[6]; //通道号
             unsigned char *PayData = (unsigned char *)&pData[7]; //负载数据
             std::lock_guard<std::mutex> lock_(data_rw_mutex);
             auto it = mboards.find(iPgbSlotId);
@@ -1367,7 +1416,7 @@ public:
                 else if(iChn1 == 3) //功率和电压 (PGB功率电阻、BIB功率电阻、单片机供电电压、DAC电压各占4字节 + 8个通道ADC采集电压(8 * 4)) -> (1+1+1+1+8)
                 {
                     float* value = (float*)PayData;
-                    for (int iT = 0; iT < iPayLen / 4) && iT < 12; iT++ )
+                    for (int iT = 0; (iT < iPayLen / 4) && (iT < 12); iT++ )
                     {
                         //printf("dbg:vol %x %x %x %x", PayData[iT*4], PayData[iT*4+1], PayData[iT*4+2], PayData[iT*4+3]);
                         if (iT < 2) {
@@ -1655,7 +1704,7 @@ public:
 
 
     bool createDirectory(const std::string& path) {
-        return mkdir(path.c_str(), 0766) == 0; // Linux/Unix权限设置
+        return mkdir(path.c_str(), 0755) == 0; // Linux/Unix权限设置
     }
 
     // 检查目录是否存在
@@ -1780,8 +1829,9 @@ private:
     std::condition_variable cv;
     
     // EEPROM 响应缓存
-    std::map<int, EepromReadCache> m_eeprom_read_cache;
-    std::map<int, EepromWeResponse> m_eeprom_write_response; // 写响应EepromWritePesponse,和擦除响应EepromEraseResponse合在一起
+    std::string m_save_path; 
+    std::map<int, std::shared_ptr<EepromReadCache>> m_eeprom_read_cache;
+    std::map<int, std::shared_ptr<EepromWeResponse>> m_eeprom_write_erase_response; // 写响应EepromWritePesponse,和擦除响应EepromEraseResponse合在一起
     std::mutex eeprom_mutex;
 };
 #endif // XBOARDDATA_H

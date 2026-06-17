@@ -132,7 +132,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     if (jmsg.contains("ip") && jmsg["ip"].is_string()) {
                         ip = jmsg["ip"].get<std::string>();
                     } else {
-                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\"},{\"message\":\"Invalid Json ip\"}");
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
                         return;
                     }
                     if (jmsg.contains("value") && jmsg["value"].is_number_integer()) {
@@ -439,7 +439,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     if (jmsg.contains("ip") && jmsg["ip"].is_string()) {
                         ip = jmsg["ip"].get<std::string>();
                     } else {
-                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\"},{\"message\":\"Invalid Json ip\"}");
+                        mg_http_reply(c, 400, "Content-Type:application/json\r\n", "{\"statusCode\":\"400\",\"message\":\"Invalid Json ip\"}");
                         return;
                     }
                     if (jmsg.contains("slot_id") && jmsg["slot_id"].is_number_integer()) {
@@ -511,7 +511,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     int count = addresses.size();
-                    if (BoardManager->ReadEeprom(ip, boardId, addresses, lengths, count) != 0) {
+                    if (BoardManager->ReadEeprom(ip, boardId, count, addresses, lengths) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom read request failed\"}");
                         return;
@@ -614,7 +614,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                     }
                     
                     int count = addresses.size();
-                    if (BoardManager->WriteEeprom(ip, boardId, addresses, lengths, hexData, count) != 0) {
+                    if (BoardManager->WriteEeprom(ip, boardId, count, addresses, lengths, hexData) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom write request failed\"}");
                         return;
@@ -701,14 +701,14 @@ static void cb(struct mg_connection *c, int ev, void *ev_data)
                         }
                     }
                     
-                    if (BoardManager->EraseEeprom(ip, boardId, addresses, lengths, count) != 0) {
+                    if (BoardManager->WriteEeprom(ip, boardId, count, addresses, lengths) != 0) {
                         mg_http_reply(c, 500, "Content-Type:application/json\r\n", 
                             "{\"statusCode\":\"500\",\"message\":\"Send Eeprom erase request failed\"}");
                         return;
                     }
                     
                     std::shared_ptr<EepromWeResponse> result;
-                    if (BoardManager->WaitEepromWriteEraseResult(ip, boardId, result, 5000)) {
+                    if (BoardManager->WaitEepromWriteEraseResult(boardId, result, 10000)) {
                         if (result->error_code == 0) {
                             mg_http_reply(c, 200, "Content-Type:application/json\r\n", 
                                 "{\"statusCode\":\"200\",\"message\":\"erase success\"}");

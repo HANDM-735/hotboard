@@ -28,7 +28,7 @@ POST 127.0.0.1: 11000/eeprom/read
 
 成功响应：
 {
-    "statusCode": "200", // 如果读取错误，此处需约定其他错误码，如：500
+    "statusCode": 200, // 如果读取错误，此处需约定其他错误码，如：500
     "message": "read success", // 如果读取错误，需在此处说明原因
     "data": [
         {
@@ -53,7 +53,7 @@ POST 127.0.0.1: 11000/eeprom/read
 
 错误响应：
 {
-    "statusCode": "500", // 可约定其他错误码
+    "statusCode": 500, // 可约定其他错误码
     "message": "unable xxxx" // 错误原因
 }
 
@@ -95,7 +95,7 @@ POST 127.0.0.1: 11000/eeprom/write
 
 响应：
 {
-    "statusCode": "200", // 如果写入错误，此处需约定其他错误码，如：500
+    "statusCode": 200, // 如果写入错误，此处需约定其他错误码，如：500
     "message": "write success" // 如果写入错误，需在此处说明原因
 }
 
@@ -141,6 +141,18 @@ POST 127.0.0.1: 11000/eeprom/erase
 
 响应：
 {
-    "statusCode": "200", // 如果擦除错误，此处需约定其他错误码，如：500
+    "statusCode": 200, // 如果擦除错误，此处需约定其他错误码，如：500
     "message": "erase success" // 如果擦除错误，需在此处说明原因
 }
+
+
+
+200 success
+400 上位机invalid json data item
+500 未知错误
+501 超时
+
+
+待定
+502	地址错误
+503	CRC错误
